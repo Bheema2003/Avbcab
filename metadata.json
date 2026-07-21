@@ -1,0 +1,6 @@
+{
+  "name": "AVB CABS",
+  "description": "Premium, reliable cab services including airport, local, one-way, and round-trip bookings with professional drivers and 24/7 availability.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
