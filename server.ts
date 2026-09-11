@@ -9,7 +9,25 @@ import { connectDB, MongoUser, MongoBooking, MongoReview } from './src/db/mongo'
 const app = express();
 const PORT = 3000;
 
+const isServerless = Boolean(
+  process.env.NETLIFY ||
+  process.env.VERCEL ||
+  process.env.AWS_LAMBDA_FUNCTION_NAME ||
+  process.env.LAMBDA_TASK_ROOT
+);
+
 app.use(express.json());
+
+// Normalize Netlify function path rewrites to match standard Express routes
+app.use((req, res, next) => {
+  if (req.url.startsWith('/.netlify/functions/api')) {
+    req.url = req.url.replace('/.netlify/functions/api', '');
+    if (!req.url.startsWith('/api')) {
+      req.url = '/api' + (req.url.startsWith('/') ? req.url : '/' + req.url);
+    }
+  }
+  next();
+});
 
 // MongoDB connection middleware (ensures DB is connected on serverless platforms)
 app.use(async (req, res, next) => {
@@ -21,26 +39,44 @@ app.use(async (req, res, next) => {
   next();
 });
 
-// Path to JSON databases
-const DATA_DIR = path.join(process.cwd(), 'data_store');
+// Path to JSON databases (use /tmp on serverless environments to avoid read-only filesystem errors)
+const DATA_DIR = isServerless ? path.join('/tmp', 'data_store') : path.join(process.cwd(), 'data_store');
+const SEED_DIR = path.join(process.cwd(), 'data_store');
 const USERS_FILE = path.join(DATA_DIR, 'users.json');
 const BOOKINGS_FILE = path.join(DATA_DIR, 'bookings.json');
 const REVIEWS_FILE = path.join(DATA_DIR, 'reviews.json');
 
 // Ensure data_store directory exists and initialize files
 if (!fs.existsSync(DATA_DIR)) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+  } catch (err) {
+    console.warn('Could not create data directory:', err);
+  }
 }
 
-const initJsonFile = (filePath: string, defaultData: any) => {
+const initJsonFile = (filePath: string, defaultData: any, seedFileName?: string) => {
   if (!fs.existsSync(filePath)) {
-    fs.writeFileSync(filePath, JSON.stringify(defaultData, null, 2), 'utf-8');
+    let content = JSON.stringify(defaultData, null, 2);
+    if (seedFileName) {
+      const seedFile = path.join(SEED_DIR, seedFileName);
+      if (fs.existsSync(seedFile)) {
+        try {
+          content = fs.readFileSync(seedFile, 'utf-8');
+        } catch {}
+      }
+    }
+    try {
+      fs.writeFileSync(filePath, content, 'utf-8');
+    } catch (err) {
+      console.warn('Could not write JSON file:', filePath, err);
+    }
   }
 };
 
-initJsonFile(USERS_FILE, []);
-initJsonFile(BOOKINGS_FILE, []);
-initJsonFile(REVIEWS_FILE, []);
+initJsonFile(USERS_FILE, [], 'users.json');
+initJsonFile(BOOKINGS_FILE, [], 'bookings.json');
+initJsonFile(REVIEWS_FILE, [], 'reviews.json');
 
 // Database reading/writing helpers with MongoDB Atlas and fallback support
 const readUsers = async (): Promise<any[]> => {
@@ -411,7 +447,8 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
   next(err);
 });
 
-// Export Express app instance for Vercel deployment support
+// Export Express app instance for Vercel and Netlify deployment support
+export { app };
 export default app;
 
 // --- VITE MIDDLEWARE SETUP ---
@@ -435,11 +472,13 @@ async function startServer() {
     });
   }
 
-  if (!process.env.VERCEL) {
+  if (!isServerless) {
     app.listen(PORT, '0.0.0.0', () => {
       console.log(`Server running on http://localhost:${PORT}`);
     });
   }
 }
 
-startServer();
+if (!isServerless) {
+  startServer();
+}
