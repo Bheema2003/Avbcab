@@ -395,6 +395,22 @@ app.post('/api/reviews', async (req, res) => {
   res.status(201).json({ success: true, review: newReview });
 });
 
+// Database error handling middleware for graceful fallback in sandboxed environments
+app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (
+    err?.name === 'MongooseError' ||
+    err?.name === 'MongoNetworkError' ||
+    (typeof err?.message === 'string' && err.message.includes('buffering timed out'))
+  ) {
+    console.warn('[AI Studio] Database offline — returning mock/fallback response');
+    if (req.method === 'GET') {
+      return res.json(req.path.endsWith('s') || req.path.endsWith('s/') ? [] : {});
+    }
+    return res.status(503).json({ error: 'Service temporarily unavailable (database offline)' });
+  }
+  next(err);
+});
+
 // Export Express app instance for Vercel deployment support
 export default app;
 

@@ -1,5 +1,8 @@
 import mongoose from 'mongoose';
 
+// Ensure Mongoose fails fast when MongoDB is unreachable in containerized environments
+mongoose.set('bufferCommands', false);
+
 // Connect to MongoDB Atlas if MONGODB_URI is provided
 let isConnected = false;
 
@@ -15,12 +18,12 @@ export const connectDB = async () => {
   }
 
   try {
-    await mongoose.connect(uri);
+    await mongoose.connect(uri, { serverSelectionTimeoutMS: 2000 });
     isConnected = true;
     console.log('MongoDB: Successfully connected to MongoDB Atlas!');
     return true;
   } catch (error) {
-    console.error('MongoDB: Connection failed:', error);
+    console.warn('MongoDB: Connection failed, falling back to local storage:', error);
     return false;
   }
 };
