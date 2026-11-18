@@ -1,6 +1,7 @@
 import express from 'express';
 import path from 'path';
 import fs from 'fs';
+import mongoose from 'mongoose';
 import { createServer as createViteServer } from 'vite';
 import 'dotenv/config';
 
@@ -27,14 +28,13 @@ app.use((req, res, next) => {
   next();
 });
 
-// Path to JSON databases (use /tmp on serverless environments to avoid read-only filesystem errors)
+// Path to JSON databases (used as durable local fallback when Atlas is unreachable)
 const DATA_DIR = isServerless ? path.join('/tmp', 'data_store') : path.join(process.cwd(), 'data_store');
 const SEED_DIR = path.join(process.cwd(), 'data_store');
 const USERS_FILE = path.join(DATA_DIR, 'users.json');
 const BOOKINGS_FILE = path.join(DATA_DIR, 'bookings.json');
 const REVIEWS_FILE = path.join(DATA_DIR, 'reviews.json');
 
-// Ensure data_store directory exists and initialize files
 if (!fs.existsSync(DATA_DIR)) {
   try {
     fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -72,8 +72,8 @@ const ensureDataDir = () => {
   }
 };
 
-// Persistent JSON database helpers
-const readUsers = async (): Promise<any[]> => {
+// Local JSON fallback helpers
+const readUsersJson = (): any[] => {
   try {
     return JSON.parse(fs.readFileSync(USERS_FILE, 'utf-8'));
   } catch {
@@ -81,12 +81,12 @@ const readUsers = async (): Promise<any[]> => {
   }
 };
 
-const writeUsers = async (users: any[]) => {
+const writeUsersJson = (users: any[]) => {
   ensureDataDir();
   fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2), 'utf-8');
 };
 
-const readBookings = async (): Promise<any[]> => {
+const readBookingsJson = (): any[] => {
   try {
     return JSON.parse(fs.readFileSync(BOOKINGS_FILE, 'utf-8'));
   } catch {
@@ -94,12 +94,12 @@ const readBookings = async (): Promise<any[]> => {
   }
 };
 
-const writeBookings = async (bookings: any[]) => {
+const writeBookingsJson = (bookings: any[]) => {
   ensureDataDir();
   fs.writeFileSync(BOOKINGS_FILE, JSON.stringify(bookings, null, 2), 'utf-8');
 };
 
-const readReviews = async (): Promise<any[]> => {
+const readReviewsJson = (): any[] => {
   try {
     return JSON.parse(fs.readFileSync(REVIEWS_FILE, 'utf-8'));
   } catch {
@@ -107,9 +107,207 @@ const readReviews = async (): Promise<any[]> => {
   }
 };
 
-const writeReviews = async (reviews: any[]) => {
+const writeReviewsJson = (reviews: any[]) => {
   ensureDataDir();
   fs.writeFileSync(REVIEWS_FILE, JSON.stringify(reviews, null, 2), 'utf-8');
+};
+
+// --- MONGODB ATLAS SETUP ---
+const DEFAULT_MONGODB_URI =
+  'mongodb+srv://Avbcab:avbcab2026@cluster0.toqcf1c.mongodb.net/avbcabs?retryWrites=true&w=majority';
+const MONGODB_URI = (process.env.MONGODB_URI || DEFAULT_MONGODB_URI).trim();
+
+const userSchema = new mongoose.Schema(
+  {
+    id: { type: String, required: true, unique: true, index: true },
+    name: { type: String, required: true },
+    email: { type: String, required: true, unique: true, lowercase: true, trim: true, index: true },
+    password: { type: String, required: true },
+    contact: { type: String, required: true },
+    role: { type: String, default: 'customer' },
+    createdAt: { type: String }
+  },
+  { versionKey: false }
+);
+
+const bookingSchema = new mongoose.Schema(
+  {
+    id: { type: String, required: true, unique: true, index: true },
+    userId: { type: String, required: true, index: true },
+    serviceType: { type: String, required: true },
+    name: { type: String, required: true },
+    contact: { type: String, required: true },
+    pickup: { type: String, required: true },
+    drop: { type: String, default: '' },
+    date: { type: String, required: true },
+    time: { type: String, required: true },
+    status: { type: String, default: 'Pending' },
+    createdAt: { type: String },
+    createdTs: { type: Number, default: () => Date.now() },
+    updatedAt: { type: String },
+    priceEstimate: { type: String },
+    finalAmount: { type: String },
+    completedAt: { type: String },
+    driverName: { type: String },
+    driverPhone: { type: String },
+    vehicleDetails: { type: String },
+    adminNotes: { type: String }
+  },
+  { versionKey: false }
+);
+
+const reviewSchema = new mongoose.Schema(
+  {
+    id: { type: String, required: true, unique: true, index: true },
+    name: { type: String, required: true },
+    rating: { type: Number, required: true },
+    comment: { type: String, required: true },
+    date: { type: String },
+    createdTs: { type: Number, default: () => Date.now() }
+  },
+  { versionKey: false }
+);
+
+const UserModel: mongoose.Model<any> = mongoose.models.User || mongoose.model('User', userSchema);
+const BookingModel: mongoose.Model<any> = mongoose.models.Booking || mongoose.model('Booking', bookingSchema);
+const ReviewModel: mongoose.Model<any> = mongoose.models.Review || mongoose.model('Review', reviewSchema);
+
+const stripMongoMeta = <T extends Record<string, any>>(doc: T | null): T | null => {
+  if (!doc) return null;
+  const { _id, __v, ...rest } = doc;
+  return rest as T;
+};
+
+let mongoConnectPromise: Promise<boolean> | null = null;
+let lastMongoFailureAt = 0;
+let lastMongoError: string | null = null;
+let localSeedMigrated = false;
+const MONGO_RETRY_COOLDOWN_MS = 15000;
+
+const migrateLocalJsonToMongoOnce = async () => {
+  if (localSeedMigrated || mongoose.connection.readyState !== 1) return;
+  localSeedMigrated = true;
+  try {
+    const localUsers = readUsersJson();
+    for (const u of localUsers) {
+      if (u?.id && u?.email) {
+        const normalizedEmail = String(u.email).toLowerCase().trim();
+        const exists = await UserModel.findOne({ $or: [{ id: u.id }, { email: normalizedEmail }] }).lean();
+        if (!exists) {
+          await UserModel.create({ ...u, email: normalizedEmail });
+        }
+      }
+    }
+
+    const localBookings = readBookingsJson();
+    for (const b of localBookings) {
+      if (b?.id) {
+        const exists = await BookingModel.findOne({ id: b.id }).lean();
+        if (!exists) {
+          await BookingModel.create(b);
+        }
+      }
+    }
+
+    const localReviews = readReviewsJson();
+    for (const r of localReviews) {
+      if (r?.id) {
+        const exists = await ReviewModel.findOne({ id: r.id }).lean();
+        if (!exists) {
+          await ReviewModel.create(r);
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('Local-to-Mongo migration warning:', err);
+  }
+};
+
+const ensureMongoConnected = async (): Promise<boolean> => {
+  if (mongoose.connection.readyState === 1) {
+    return true;
+  }
+
+  if (!MONGODB_URI) {
+    lastMongoError = 'MONGODB_URI not configured';
+    return false;
+  }
+
+  const now = Date.now();
+  if (lastMongoFailureAt && now - lastMongoFailureAt < MONGO_RETRY_COOLDOWN_MS) {
+    return false;
+  }
+
+  if (!mongoConnectPromise) {
+    mongoConnectPromise = mongoose
+      .connect(MONGODB_URI, {
+        serverSelectionTimeoutMS: 5000,
+        connectTimeoutMS: 5000
+      })
+      .then(async () => {
+        lastMongoError = null;
+        lastMongoFailureAt = 0;
+        console.log('MongoDB Atlas connected:', mongoose.connection.host);
+        await migrateLocalJsonToMongoOnce();
+        return true;
+      })
+      .catch((err: any) => {
+        lastMongoFailureAt = Date.now();
+        lastMongoError = err?.message || 'MongoDB connection failed';
+        console.warn('MongoDB Atlas unavailable, using local JSON store:', lastMongoError);
+        return false;
+      })
+      .finally(() => {
+        mongoConnectPromise = null;
+      });
+  }
+
+  return mongoConnectPromise;
+};
+
+// Trigger non-blocking connection on boot
+void ensureMongoConnected();
+
+// Unified persistence helpers (MongoDB Atlas primary + local JSON fallback)
+const readUsers = async (): Promise<any[]> => {
+  if (await ensureMongoConnected()) {
+    const docs = await UserModel.find({}).lean();
+    return docs.map(d => stripMongoMeta(d)).filter(Boolean);
+  }
+  return readUsersJson();
+};
+
+const writeUsers = async (users: any[]) => {
+  if (!isServerless) {
+    writeUsersJson(users);
+  }
+  if (await ensureMongoConnected()) {
+    for (const u of users) {
+      if (!u?.id || !u?.email) continue;
+      const normalizedEmail = String(u.email).toLowerCase().trim();
+      await UserModel.updateOne(
+        { id: u.id },
+        { $setOnInsert: { ...u, email: normalizedEmail } },
+        { upsert: true }
+      ).catch(() => {});
+    }
+  }
+};
+
+const readBookings = async (): Promise<any[]> => {
+  if (await ensureMongoConnected()) {
+    const docs = await BookingModel.find({}).sort({ createdTs: -1, _id: -1 }).lean();
+    return docs.map(d => stripMongoMeta(d)).filter(Boolean);
+  }
+  return readBookingsJson();
+};
+
+const readReviews = async (): Promise<any[]> => {
+  if (await ensureMongoConnected()) {
+    const docs = await ReviewModel.find({}).sort({ createdTs: -1, _id: -1 }).lean();
+    return docs.map(d => stripMongoMeta(d)).filter(Boolean);
+  }
+  return readReviewsJson();
 };
 
 // Admin Credentials setting
@@ -121,43 +319,73 @@ const ADMIN_TOKEN = 'avb-admin-super-secure-token-2026';
 
 // Health & storage check
 app.get('/api/health', async (req, res) => {
+  const mongoConnected = await ensureMongoConnected();
   res.json({
     ok: true,
     connected: true,
-    storage: 'local-json'
+    storage: mongoConnected ? 'mongodb-atlas' : 'local-json',
+    mongoConnected,
+    mongoCluster: 'cluster0.toqcf1c.mongodb.net',
+    mongoError: mongoConnected ? null : lastMongoError
   });
 });
 
 // Sync local data back to server (for durability across restarts/republishes)
 app.post('/api/sync', async (req, res) => {
   const { bookings, users } = req.body;
+  const mongoConnected = await ensureMongoConnected();
 
   try {
     if (Array.isArray(bookings)) {
-      const currentBookings = await readBookings();
-      const bookingMap = new Map(currentBookings.map(b => [b.id, b]));
-      bookings.forEach(b => {
-        // Only restore bookings missing from server storage; never overwrite server updates with stale client cache
-        if (b && b.id && !bookingMap.has(b.id)) {
-          bookingMap.set(b.id, b);
+      if (mongoConnected) {
+        const existingIds = new Set(
+          (await BookingModel.find({}, { id: 1 }).lean()).map((b: any) => b.id)
+        );
+        for (const b of bookings) {
+          if (b && b.id && !existingIds.has(b.id)) {
+            await BookingModel.create(b).catch(() => {});
+            existingIds.add(b.id);
+          }
         }
-      });
-      await writeBookings(Array.from(bookingMap.values()));
+      } else {
+        const currentBookings = readBookingsJson();
+        const bookingMap = new Map(currentBookings.map(b => [b.id, b]));
+        bookings.forEach(b => {
+          if (b && b.id && !bookingMap.has(b.id)) {
+            bookingMap.set(b.id, b);
+          }
+        });
+        writeBookingsJson(Array.from(bookingMap.values()));
+      }
     }
 
     if (Array.isArray(users)) {
-      const currentUsers = await readUsers();
-      const userMap = new Map(currentUsers.map(u => [u.id, u]));
-      const emailSet = new Set(currentUsers.map(u => String(u.email || '').toLowerCase().trim()));
-      users.forEach(u => {
-        const normalizedEmail = String(u?.email || '').toLowerCase().trim();
-        if (u && u.id && normalizedEmail && !userMap.has(u.id) && !emailSet.has(normalizedEmail)) {
-          const cleanUser = { ...u, email: normalizedEmail };
-          userMap.set(u.id, cleanUser);
-          emailSet.add(normalizedEmail);
+      if (mongoConnected) {
+        const existingUsers = await UserModel.find({}, { id: 1, email: 1 }).lean();
+        const idSet = new Set(existingUsers.map((u: any) => u.id));
+        const emailSet = new Set(existingUsers.map((u: any) => String(u.email || '').toLowerCase().trim()));
+        for (const u of users) {
+          const normalizedEmail = String(u?.email || '').toLowerCase().trim();
+          if (u && u.id && normalizedEmail && !idSet.has(u.id) && !emailSet.has(normalizedEmail)) {
+            await UserModel.create({ ...u, email: normalizedEmail }).catch(() => {});
+            idSet.add(u.id);
+            emailSet.add(normalizedEmail);
+          }
         }
-      });
-      await writeUsers(Array.from(userMap.values()));
+      } else {
+        const currentUsers = readUsersJson();
+        const userMap = new Map(currentUsers.map(u => [u.id, u]));
+        const emailSet = new Set(currentUsers.map(u => String(u.email || '').toLowerCase().trim()));
+        users.forEach(u => {
+          const normalizedEmail = String(u?.email || '').toLowerCase().trim();
+          if (u && u.id && normalizedEmail && !userMap.has(u.id) && !emailSet.has(normalizedEmail)) {
+            const cleanUser = { ...u, email: normalizedEmail };
+            userMap.set(u.id, cleanUser);
+            emailSet.add(normalizedEmail);
+          }
+        });
+        writeUsersJson(Array.from(userMap.values()));
+      }
     }
 
     const latestUsers = (await readUsers()).map(({ password: _, ...safe }) => safe);
@@ -175,9 +403,29 @@ app.post('/api/auth/signup', async (req, res) => {
     return res.status(400).json({ error: 'All fields are required.' });
   }
 
-  const users = await readUsers();
   const normalizedEmail = email.toLowerCase().trim();
+  const mongoConnected = await ensureMongoConnected();
 
+  if (mongoConnected) {
+    const existing = await UserModel.findOne({ email: normalizedEmail }).lean();
+    if (existing) {
+      return res.status(400).json({ error: 'An account with this email already exists.' });
+    }
+    const newUser = {
+      id: 'USR-' + Math.floor(100000 + Math.random() * 900000),
+      name,
+      email: normalizedEmail,
+      password,
+      contact,
+      role: 'customer',
+      createdAt: new Date().toISOString()
+    };
+    await UserModel.create(newUser);
+    const { password: _, ...userSafe } = newUser;
+    return res.status(201).json({ success: true, user: userSafe });
+  }
+
+  const users = readUsersJson();
   const userExists = users.find(u => u.email === normalizedEmail);
   if (userExists) {
     return res.status(400).json({ error: 'An account with this email already exists.' });
@@ -187,16 +435,15 @@ app.post('/api/auth/signup', async (req, res) => {
     id: 'USR-' + Math.floor(100000 + Math.random() * 900000),
     name,
     email: normalizedEmail,
-    password, // Stored directly since it is a sandboxed training applet, but separated on server-side
+    password,
     contact,
     role: 'customer',
     createdAt: new Date().toISOString()
   };
 
   users.push(newUser);
-  await writeUsers(users);
+  writeUsersJson(users);
 
-  // Return user without password
   const { password: _, ...userSafe } = newUser;
   res.status(201).json({ success: true, user: userSafe });
 });
@@ -208,12 +455,40 @@ app.post('/api/auth/login', async (req, res) => {
     return res.status(400).json({ error: 'Email and password are required.' });
   }
 
-  const users = await readUsers();
   const normalizedEmail = email.toLowerCase().trim();
+  const mongoConnected = await ensureMongoConnected();
 
+  if (mongoConnected) {
+    let user: any = stripMongoMeta(
+      await UserModel.findOne({ email: normalizedEmail, password }).lean()
+    );
+
+    if (
+      !user &&
+      durableUser &&
+      typeof durableUser.email === 'string' &&
+      durableUser.email.toLowerCase().trim() === normalizedEmail &&
+      durableUser.password === password &&
+      durableUser.id
+    ) {
+      const emailTaken = await UserModel.findOne({ email: normalizedEmail }).lean();
+      if (!emailTaken) {
+        user = { ...durableUser, email: normalizedEmail };
+        await UserModel.create(user);
+      }
+    }
+
+    if (!user) {
+      return res.status(401).json({ error: 'Invalid email or password.' });
+    }
+
+    const { password: _, ...userSafe } = user;
+    return res.json({ success: true, user: userSafe });
+  }
+
+  const users = readUsersJson();
   let user = users.find(u => u.email === normalizedEmail && u.password === password);
 
-  // Restore customer account seamlessly if container storage reset since signup
   if (
     !user &&
     durableUser &&
@@ -228,7 +503,7 @@ app.post('/api/auth/login', async (req, res) => {
       email: normalizedEmail
     };
     users.push(user);
-    await writeUsers(users);
+    writeUsersJson(users);
   }
 
   if (!user) {
@@ -260,8 +535,44 @@ app.post('/api/bookings', async (req, res) => {
     return res.status(400).json({ error: 'User ID and booking details are required.' });
   }
 
-  // Validate user exists (and restore logged-in user profile if ephemeral storage reset)
-  const users = await readUsers();
+  const mongoConnected = await ensureMongoConnected();
+
+  if (mongoConnected) {
+    let user = await UserModel.findOne({ id: userId }).lean();
+    if (!user && userProfile && userProfile.id === userId && userProfile.email) {
+      const restored = {
+        ...userProfile,
+        email: String(userProfile.email).toLowerCase().trim(),
+        role: 'customer',
+        createdAt: userProfile.createdAt || new Date().toISOString()
+      };
+      await UserModel.updateOne({ id: userId }, { $setOnInsert: restored }, { upsert: true });
+      user = restored;
+    }
+    if (!user) {
+      return res.status(401).json({ error: 'Unauthorized user. Account not found.' });
+    }
+
+    const newBooking = {
+      ...bookingDetails,
+      id: bookingDetails.id || 'AVB-' + Math.floor(100000 + Math.random() * 900000),
+      userId,
+      status: 'Pending',
+      createdTs: Date.now(),
+      createdAt: new Date().toLocaleDateString('en-IN', {
+        day: 'numeric',
+        month: 'short',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
+      })
+    };
+
+    await BookingModel.create(newBooking);
+    return res.status(201).json({ success: true, booking: newBooking });
+  }
+
+  const users = readUsersJson();
   let user = users.find(u => u.id === userId);
   if (!user && userProfile && userProfile.id === userId && userProfile.email) {
     user = {
@@ -271,18 +582,19 @@ app.post('/api/bookings', async (req, res) => {
       createdAt: userProfile.createdAt || new Date().toISOString()
     };
     users.push(user);
-    await writeUsers(users);
+    writeUsersJson(users);
   }
   if (!user) {
     return res.status(401).json({ error: 'Unauthorized user. Account not found.' });
   }
 
-  const bookings = await readBookings();
+  const bookings = readBookingsJson();
   const newBooking = {
     ...bookingDetails,
     id: bookingDetails.id || 'AVB-' + Math.floor(100000 + Math.random() * 900000),
     userId,
     status: 'Pending',
+    createdTs: Date.now(),
     createdAt: new Date().toLocaleDateString('en-IN', {
       day: 'numeric',
       month: 'short',
@@ -293,7 +605,7 @@ app.post('/api/bookings', async (req, res) => {
   };
 
   bookings.unshift(newBooking);
-  await writeBookings(bookings);
+  writeBookingsJson(bookings);
 
   res.status(201).json({ success: true, booking: newBooking });
 });
@@ -305,7 +617,14 @@ app.get('/api/bookings/my', async (req, res) => {
     return res.status(400).json({ error: 'User ID is required.' });
   }
 
-  const bookings = await readBookings();
+  if (await ensureMongoConnected()) {
+    const docs = await BookingModel.find({ userId: String(userId) })
+      .sort({ createdTs: -1, _id: -1 })
+      .lean();
+    return res.json({ success: true, bookings: docs.map(d => stripMongoMeta(d)) });
+  }
+
+  const bookings = readBookingsJson();
   const myBookings = bookings.filter(b => b.userId === userId);
   res.json({ success: true, bookings: myBookings });
 });
@@ -319,7 +638,23 @@ app.put('/api/bookings/:id/cancel', async (req, res) => {
     return res.status(400).json({ error: 'User ID is required.' });
   }
 
-  const bookings = await readBookings();
+  if (await ensureMongoConnected()) {
+    const existing: any = await BookingModel.findOne({ id }).lean();
+    if (!existing) {
+      return res.status(404).json({ error: 'Booking not found.' });
+    }
+    if (existing.userId !== userId) {
+      return res.status(403).json({ error: 'Unauthorized ownership.' });
+    }
+    const updated = await BookingModel.findOneAndUpdate(
+      { id },
+      { $set: { status: 'Cancelled', updatedAt: new Date().toISOString() } },
+      { new: true }
+    ).lean();
+    return res.json({ success: true, booking: stripMongoMeta(updated) });
+  }
+
+  const bookings = readBookingsJson();
   const index = bookings.findIndex(b => b.id === id);
 
   if (index === -1) {
@@ -331,7 +666,8 @@ app.put('/api/bookings/:id/cancel', async (req, res) => {
   }
 
   bookings[index].status = 'Cancelled';
-  await writeBookings(bookings);
+  bookings[index].updatedAt = new Date().toISOString();
+  writeBookingsJson(bookings);
 
   res.json({ success: true, booking: bookings[index] });
 });
@@ -371,15 +707,53 @@ app.put('/api/admin/bookings/:id/status', async (req, res) => {
     return res.status(400).json({ error: 'Invalid status.' });
   }
 
-  const bookings = await readBookings();
+  const cleanedAmount = finalAmount !== undefined ? String(finalAmount).replace(/,/g, '').trim() : undefined;
+
+  if (await ensureMongoConnected()) {
+    const existing: any = await BookingModel.findOne({ id }).lean();
+    if (!existing) {
+      return res.status(404).json({ error: 'Booking not found.' });
+    }
+
+    const updateFields: Record<string, any> = {
+      status,
+      updatedAt: new Date().toISOString()
+    };
+
+    if (status === 'Completed') {
+      const effectiveAmount =
+        cleanedAmount !== undefined
+          ? cleanedAmount
+          : String(existing.finalAmount || '').replace(/,/g, '').trim();
+      const numericAmount = Number(effectiveAmount);
+      if (!effectiveAmount || Number.isNaN(numericAmount) || numericAmount <= 0) {
+        return res.status(400).json({ error: 'Please enter amount before marking booking as Completed.' });
+      }
+      updateFields.finalAmount = effectiveAmount;
+      updateFields.completedAt = existing.completedAt || new Date().toISOString();
+    } else if (cleanedAmount !== undefined) {
+      updateFields.finalAmount = cleanedAmount;
+    }
+
+    const updated = await BookingModel.findOneAndUpdate(
+      { id },
+      { $set: updateFields },
+      { new: true }
+    ).lean();
+    return res.json({ success: true, booking: stripMongoMeta(updated) });
+  }
+
+  const bookings = readBookingsJson();
   const index = bookings.findIndex(b => b.id === id);
   if (index === -1) {
     return res.status(404).json({ error: 'Booking not found.' });
   }
 
-  const cleanedAmount = finalAmount !== undefined ? String(finalAmount).replace(/,/g, '').trim() : undefined;
   if (status === 'Completed') {
-    const effectiveAmount = cleanedAmount !== undefined ? cleanedAmount : String(bookings[index].finalAmount || '').replace(/,/g, '').trim();
+    const effectiveAmount =
+      cleanedAmount !== undefined
+        ? cleanedAmount
+        : String(bookings[index].finalAmount || '').replace(/,/g, '').trim();
     const numericAmount = Number(effectiveAmount);
     if (!effectiveAmount || Number.isNaN(numericAmount) || numericAmount <= 0) {
       return res.status(400).json({ error: 'Please enter amount before marking booking as Completed.' });
@@ -392,7 +766,7 @@ app.put('/api/admin/bookings/:id/status', async (req, res) => {
 
   bookings[index].status = status;
   bookings[index].updatedAt = new Date().toISOString();
-  await writeBookings(bookings);
+  writeBookingsJson(bookings);
 
   res.json({ success: true, booking: bookings[index] });
 });
@@ -427,7 +801,51 @@ app.put('/api/admin/bookings/:id', async (req, res) => {
     return res.status(400).json({ error: 'Invalid status.' });
   }
 
-  const bookings = await readBookings();
+  if (await ensureMongoConnected()) {
+    const current: any = await BookingModel.findOne({ id }).lean();
+    if (!current) {
+      return res.status(404).json({ error: 'Booking not found.' });
+    }
+
+    const nextStatus = status !== undefined ? status : current.status;
+    const cleanedAmount =
+      finalAmount !== undefined ? String(finalAmount).replace(/,/g, '').trim() : current.finalAmount;
+
+    if (nextStatus === 'Completed') {
+      const numericAmount = Number(String(cleanedAmount || '').replace(/,/g, '').trim());
+      if (!cleanedAmount || Number.isNaN(numericAmount) || numericAmount <= 0) {
+        return res.status(400).json({ error: 'Please enter amount before marking booking as Completed.' });
+      }
+    }
+
+    const updateFields: Record<string, any> = {
+      ...(name !== undefined ? { name } : {}),
+      ...(contact !== undefined ? { contact } : {}),
+      ...(serviceType !== undefined ? { serviceType } : {}),
+      ...(pickup !== undefined ? { pickup } : {}),
+      ...(drop !== undefined ? { drop } : {}),
+      ...(date !== undefined ? { date } : {}),
+      ...(time !== undefined ? { time } : {}),
+      ...(status !== undefined ? { status } : {}),
+      ...(priceEstimate !== undefined ? { priceEstimate } : {}),
+      ...(finalAmount !== undefined ? { finalAmount: cleanedAmount } : {}),
+      ...(nextStatus === 'Completed' ? { completedAt: current.completedAt || new Date().toISOString() } : {}),
+      ...(driverName !== undefined ? { driverName } : {}),
+      ...(driverPhone !== undefined ? { driverPhone } : {}),
+      ...(vehicleDetails !== undefined ? { vehicleDetails } : {}),
+      ...(adminNotes !== undefined ? { adminNotes } : {}),
+      updatedAt: new Date().toISOString()
+    };
+
+    const updated = await BookingModel.findOneAndUpdate(
+      { id },
+      { $set: updateFields },
+      { new: true }
+    ).lean();
+    return res.json({ success: true, booking: stripMongoMeta(updated) });
+  }
+
+  const bookings = readBookingsJson();
   const index = bookings.findIndex(b => b.id === id);
   if (index === -1) {
     return res.status(404).json({ error: 'Booking not found.' });
@@ -464,7 +882,7 @@ app.put('/api/admin/bookings/:id', async (req, res) => {
     updatedAt: new Date().toISOString()
   };
 
-  await writeBookings(bookings);
+  writeBookingsJson(bookings);
 
   res.json({ success: true, booking: bookings[index] });
 });
@@ -482,12 +900,12 @@ app.post('/api/reviews', async (req, res) => {
     return res.status(400).json({ error: 'All fields are required.' });
   }
 
-  const reviews = await readReviews();
   const newReview = {
     id: 'REV-' + Math.floor(100000 + Math.random() * 900000),
     name,
     rating: Number(rating),
     comment,
+    createdTs: Date.now(),
     date: new Date().toLocaleDateString('en-IN', {
       day: 'numeric',
       month: 'short',
@@ -495,8 +913,14 @@ app.post('/api/reviews', async (req, res) => {
     })
   };
 
+  if (await ensureMongoConnected()) {
+    await ReviewModel.create(newReview);
+    return res.status(201).json({ success: true, review: newReview });
+  }
+
+  const reviews = readReviewsJson();
   reviews.unshift(newReview);
-  await writeReviews(reviews);
+  writeReviewsJson(reviews);
 
   res.status(201).json({ success: true, review: newReview });
 });
