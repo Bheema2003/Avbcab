@@ -27,7 +27,44 @@ export default function AdminDashboard({ adminToken, onLogout }: AdminDashboardP
   const [sortBy, setSortBy] = useState<'date' | 'id'>('date');
   const [updatingId, setUpdatingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [actionSuccess, setActionSuccess] = useState<string | null>(null);
   const [selectedBooking, setSelectedBooking] = useState<EnrichedBooking | null>(null);
+  const [isEditingDetails, setIsEditingDetails] = useState(false);
+  const [editForm, setEditForm] = useState({
+    serviceType: 'Airport',
+    pickup: '',
+    drop: '',
+    date: '',
+    time: '',
+    priceEstimate: '',
+    driverName: '',
+    driverPhone: '',
+    vehicleDetails: '',
+    adminNotes: '',
+    status: 'Pending'
+  });
+
+  useEffect(() => {
+    if (selectedBooking) {
+      setEditForm({
+        serviceType: selectedBooking.serviceType || 'Airport',
+        pickup: selectedBooking.pickup || '',
+        drop: selectedBooking.drop || '',
+        date: selectedBooking.date || '',
+        time: selectedBooking.time || '',
+        priceEstimate: selectedBooking.priceEstimate || '',
+        driverName: selectedBooking.driverName || '',
+        driverPhone: selectedBooking.driverPhone || '',
+        vehicleDetails: selectedBooking.vehicleDetails || '',
+        adminNotes: selectedBooking.adminNotes || '',
+        status: selectedBooking.status || 'Pending'
+      });
+      setIsEditingDetails(false);
+      setActionError(null);
+      setActionSuccess(null);
+    }
+  }, [selectedBooking?.id]);
 
   const fetchBookings = async () => {
     setLoading(true);
@@ -67,8 +104,36 @@ export default function AdminDashboard({ adminToken, onLogout }: AdminDashboardP
     fetchBookings();
   }, [adminToken]);
 
+  const syncBookingToDurableStore = (updatedList: EnrichedBooking[]) => {
+    const existingDurableStr = localStorage.getItem('avb_durable_bookings') || '[]';
+    try {
+      const existingDurable = JSON.parse(existingDurableStr);
+      const map = new Map(Array.isArray(existingDurable) ? existingDurable.map((b: any) => [b.id, b]) : []);
+      updatedList.forEach((b: any) => {
+        const { customerDetails, ...cleanBooking } = b;
+        map.set(b.id, cleanBooking);
+      });
+      localStorage.setItem('avb_durable_bookings', JSON.stringify(Array.from(map.values())));
+    } catch (err) {}
+  };
+
+  const applyUpdatedBooking = (savedBooking: Booking) => {
+    setBookings(prev => {
+      const updated = prev.map(b =>
+        b.id === savedBooking.id ? { ...b, ...savedBooking } : b
+      );
+      syncBookingToDurableStore(updated);
+      return updated;
+    });
+    setSelectedBooking(prev =>
+      prev && prev.id === savedBooking.id ? { ...prev, ...savedBooking } : prev
+    );
+  };
+
   const handleStatusChange = async (bookingId: string, newStatus: string) => {
     setUpdatingId(bookingId);
+    setActionError(null);
+    setActionSuccess(null);
     try {
       const response = await fetch(`/api/admin/bookings/${bookingId}/status`, {
         method: 'PUT',
@@ -80,31 +145,43 @@ export default function AdminDashboard({ adminToken, onLogout }: AdminDashboardP
       });
       const data = await response.json();
       if (response.ok && data.success) {
-        // Update local state and sync to global durable store
-        setBookings(prev => {
-          const updated = prev.map(b => b.id === bookingId ? { ...b, status: newStatus as any } : b);
-          const existingDurableStr = localStorage.getItem('avb_durable_bookings') || '[]';
-          try {
-            const existingDurable = JSON.parse(existingDurableStr);
-            const map = new Map(existingDurable.map((b: any) => [b.id, b]));
-            updated.forEach((b: any) => {
-              const { customerDetails, ...cleanBooking } = b;
-              const existing = map.get(b.id);
-              map.set(b.id, existing ? Object.assign({}, existing, cleanBooking) : cleanBooking);
-            });
-            localStorage.setItem('avb_durable_bookings', JSON.stringify(Array.from(map.values())));
-          } catch (err) {}
-          return updated;
-        });
-
-        if (selectedBooking && selectedBooking.id === bookingId) {
-          setSelectedBooking(prev => prev ? { ...prev, status: newStatus as any } : null);
-        }
+        applyUpdatedBooking(data.booking);
+        setActionSuccess(`Status updated to ${newStatus}`);
       } else {
-        alert(data.error || 'Failed to update status.');
+        setActionError(data.error || 'Failed to update status.');
       }
     } catch (err) {
-      alert('Network error. Failed to update status.');
+      setActionError('Network error. Failed to update status.');
+    } finally {
+      setUpdatingId(null);
+    }
+  };
+
+  const handleSaveBookingDetails = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedBooking) return;
+    setUpdatingId(selectedBooking.id);
+    setActionError(null);
+    setActionSuccess(null);
+    try {
+      const response = await fetch(`/api/admin/bookings/${selectedBooking.id}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': adminToken
+        },
+        body: JSON.stringify(editForm)
+      });
+      const data = await response.json();
+      if (response.ok && data.success) {
+        applyUpdatedBooking(data.booking);
+        setIsEditingDetails(false);
+        setActionSuccess('Booking details synced to customer history.');
+      } else {
+        setActionError(data.error || 'Failed to save booking updates.');
+      }
+    } catch (err) {
+      setActionError('Network error. Failed to save booking updates.');
     } finally {
       setUpdatingId(null);
     }
@@ -136,14 +213,17 @@ export default function AdminDashboard({ adminToken, onLogout }: AdminDashboardP
   // Calculate stats
   const totalBookings = bookings.length;
   const pendingBookings = bookings.filter(b => b.status === 'Pending').length;
-  const confirmedBookings = bookings.filter(b => b.status === 'Confirmed' || b.status === 'Driver Assigned').length;
+  const confirmedBookings = bookings.filter(b =>
+    b.status === 'Confirmed' || b.status === 'Driver Assigned' || b.status === 'In Progress'
+  ).length;
   const completedBookings = bookings.filter(b => b.status === 'Completed').length;
 
   const getStatusColor = (status: string) => {
     switch (status) {
       case 'Pending': return 'bg-amber-500/10 border-amber-500/30 text-amber-500';
       case 'Confirmed': return 'bg-sky-500/10 border-sky-500/30 text-sky-500';
-      case 'In Progress': return 'bg-purple-500/10 border-purple-500/30 text-purple-500';
+      case 'Driver Assigned': return 'bg-amber-500/15 border-amber-400/40 text-brand-yellow';
+      case 'In Progress': return 'bg-purple-500/10 border-purple-500/30 text-purple-400';
       case 'Completed': return 'bg-emerald-500/10 border-emerald-500/30 text-emerald-500';
       case 'Cancelled': return 'bg-rose-500/10 border-rose-500/30 text-rose-500';
       default: return 'bg-zinc-500/10 border-zinc-500/30 text-zinc-400';
@@ -223,8 +303,8 @@ export default function AdminDashboard({ adminToken, onLogout }: AdminDashboardP
 
           {/* Filter Options */}
           <div className="flex flex-wrap gap-3 w-full md:w-auto items-center">
-            <div className="flex items-center gap-2 bg-zinc-950 border border-zinc-800/80 p-1 rounded-xl">
-              {['All', 'Pending', 'Confirmed', 'In Progress', 'Completed', 'Cancelled'].map((status) => (
+            <div className="flex flex-wrap items-center gap-1.5 bg-zinc-950 border border-zinc-800/80 p-1 rounded-xl">
+              {['All', 'Pending', 'Confirmed', 'Driver Assigned', 'In Progress', 'Completed', 'Cancelled'].map((status) => (
                 <button
                   key={status}
                   onClick={() => setStatusFilter(status)}
@@ -352,84 +432,261 @@ export default function AdminDashboard({ adminToken, onLogout }: AdminDashboardP
                       </span>
                     </div>
 
-                    {/* Route Details */}
-                    <div className="space-y-3.5">
-                      <h4 className="text-xs text-zinc-500 font-bold uppercase tracking-widest font-mono">Route Details</h4>
-                      <div className="space-y-3 bg-zinc-950 p-4 rounded-xl border border-zinc-800">
-                        <div className="flex items-start gap-3">
-                          <div className="w-2 h-2 bg-emerald-500 rounded-full mt-1.5 shrink-0"></div>
-                          <div>
-                            <span className="text-zinc-500 text-[10px] uppercase font-bold block">Pickup Location</span>
-                            <span className="text-white text-xs font-semibold leading-normal">{selectedBooking.pickup}</span>
-                          </div>
-                        </div>
-                        <div className="flex items-start gap-3 pt-2.5 border-t border-zinc-800/60">
-                          <div className="w-2 h-2 bg-rose-500 rounded-full mt-1.5 shrink-0"></div>
-                          <div>
-                            <span className="text-zinc-500 text-[10px] uppercase font-bold block">Drop Destination</span>
-                            <span className="text-white text-xs font-semibold leading-normal">{selectedBooking.drop}</span>
-                          </div>
-                        </div>
-                      </div>
+                    {/* Route Details / Full Editor */}
+                    <div className="flex items-center justify-between">
+                      <h4 className="text-xs text-zinc-500 font-bold uppercase tracking-widest font-mono">
+                        {isEditingDetails ? 'Edit Booking & Driver' : 'Booking Details'}
+                      </h4>
+                      <button
+                        type="button"
+                        onClick={() => setIsEditingDetails(prev => !prev)}
+                        className="text-xs font-semibold text-brand-yellow hover:underline cursor-pointer"
+                      >
+                        {isEditingDetails ? 'Cancel Edit' : 'Edit Details / Driver'}
+                      </button>
                     </div>
 
-                    {/* Booking Timings */}
-                    <div className="grid grid-cols-2 gap-4">
-                      <div className="bg-zinc-950 p-3 rounded-xl border border-zinc-800">
-                        <span className="text-zinc-500 text-[10px] uppercase block font-bold">DATE</span>
-                        <span className="text-white text-sm font-bold font-mono">{selectedBooking.date}</span>
+                    {actionError && (
+                      <div className="bg-rose-500/10 border border-rose-500/30 text-rose-400 p-2.5 rounded-xl text-xs">
+                        {actionError}
                       </div>
-                      <div className="bg-zinc-950 p-3 rounded-xl border border-zinc-800">
-                        <span className="text-zinc-500 text-[10px] uppercase block font-bold">TIME</span>
-                        <span className="text-white text-sm font-bold font-mono">{selectedBooking.time}</span>
+                    )}
+                    {actionSuccess && (
+                      <div className="bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 p-2.5 rounded-xl text-xs">
+                        {actionSuccess}
                       </div>
-                    </div>
+                    )}
 
-                    {/* Customer Account Details */}
-                    <div className="space-y-3">
-                      <h4 className="text-xs text-zinc-500 font-bold uppercase tracking-widest font-mono">Customer Information</h4>
-                      <div className="bg-zinc-950 p-4 rounded-xl border border-zinc-800 space-y-2 text-xs">
+                    {isEditingDetails ? (
+                      <form onSubmit={handleSaveBookingDetails} className="space-y-3 bg-zinc-950 p-4 rounded-xl border border-zinc-800 text-xs">
                         <div>
-                          <span className="text-zinc-500 uppercase text-[9px] block">Full Name</span>
-                          <span className="text-white font-semibold">{selectedBooking.name}</span>
+                          <label className="text-zinc-500 uppercase text-[10px] font-bold block mb-1">Status</label>
+                          <select
+                            value={editForm.status}
+                            onChange={(e) => setEditForm(f => ({ ...f, status: e.target.value }))}
+                            className="w-full bg-zinc-900 border border-zinc-800 rounded-lg py-2 px-3 text-white outline-none"
+                          >
+                            <option value="Pending">Pending</option>
+                            <option value="Confirmed">Confirmed</option>
+                            <option value="Driver Assigned">Driver Assigned</option>
+                            <option value="In Progress">In Progress</option>
+                            <option value="Completed">Completed</option>
+                            <option value="Cancelled">Cancelled</option>
+                          </select>
                         </div>
-                        <div className="pt-2.5 border-t border-zinc-800/60">
-                          <span className="text-zinc-500 uppercase text-[9px] block">Contact Number</span>
-                          <span className="text-white font-mono">{selectedBooking.contact}</span>
+
+                        <div>
+                          <label className="text-zinc-500 uppercase text-[10px] font-bold block mb-1">Service Type</label>
+                          <select
+                            value={editForm.serviceType}
+                            onChange={(e) => setEditForm(f => ({ ...f, serviceType: e.target.value }))}
+                            className="w-full bg-zinc-900 border border-zinc-800 rounded-lg py-2 px-3 text-white outline-none"
+                          >
+                            <option value="Airport">Airport</option>
+                            <option value="Local">Local</option>
+                            <option value="One Way">One Way</option>
+                            <option value="Round Trip">Round Trip</option>
+                          </select>
                         </div>
-                        {selectedBooking.customerDetails?.email && (
-                          <div className="pt-2.5 border-t border-zinc-800/60">
-                            <span className="text-zinc-500 uppercase text-[9px] block">Email Address</span>
-                            <span className="text-white font-mono break-all">{selectedBooking.customerDetails.email}</span>
+
+                        <div>
+                          <label className="text-zinc-500 uppercase text-[10px] font-bold block mb-1">Pickup Location</label>
+                          <input
+                            type="text"
+                            required
+                            value={editForm.pickup}
+                            onChange={(e) => setEditForm(f => ({ ...f, pickup: e.target.value }))}
+                            className="w-full bg-zinc-900 border border-zinc-800 rounded-lg py-2 px-3 text-white outline-none"
+                          />
+                        </div>
+
+                        <div>
+                          <label className="text-zinc-500 uppercase text-[10px] font-bold block mb-1">Drop Destination</label>
+                          <input
+                            type="text"
+                            required
+                            value={editForm.drop}
+                            onChange={(e) => setEditForm(f => ({ ...f, drop: e.target.value }))}
+                            className="w-full bg-zinc-900 border border-zinc-800 rounded-lg py-2 px-3 text-white outline-none"
+                          />
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-2">
+                          <div>
+                            <label className="text-zinc-500 uppercase text-[10px] font-bold block mb-1">Date</label>
+                            <input
+                              type="date"
+                              required
+                              value={editForm.date}
+                              onChange={(e) => setEditForm(f => ({ ...f, date: e.target.value }))}
+                              className="w-full bg-zinc-900 border border-zinc-800 rounded-lg py-2 px-2 text-white font-mono outline-none [color-scheme:dark]"
+                            />
+                          </div>
+                          <div>
+                            <label className="text-zinc-500 uppercase text-[10px] font-bold block mb-1">Time</label>
+                            <input
+                              type="time"
+                              required
+                              value={editForm.time}
+                              onChange={(e) => setEditForm(f => ({ ...f, time: e.target.value }))}
+                              className="w-full bg-zinc-900 border border-zinc-800 rounded-lg py-2 px-2 text-white font-mono outline-none [color-scheme:dark]"
+                            />
+                          </div>
+                        </div>
+
+                        <div>
+                          <label className="text-zinc-500 uppercase text-[10px] font-bold block mb-1">Fare Estimate</label>
+                          <input
+                            type="text"
+                            placeholder="e.g. ₹1,499"
+                            value={editForm.priceEstimate}
+                            onChange={(e) => setEditForm(f => ({ ...f, priceEstimate: e.target.value }))}
+                            className="w-full bg-zinc-900 border border-zinc-800 rounded-lg py-2 px-3 text-white outline-none"
+                          />
+                        </div>
+
+                        <div className="pt-2 border-t border-zinc-800/80 space-y-2.5">
+                          <span className="text-brand-yellow uppercase text-[10px] font-bold block">Driver & Vehicle Info (Visible to Customer)</span>
+                          <input
+                            type="text"
+                            placeholder="Driver Name"
+                            value={editForm.driverName}
+                            onChange={(e) => setEditForm(f => ({ ...f, driverName: e.target.value }))}
+                            className="w-full bg-zinc-900 border border-zinc-800 rounded-lg py-2 px-3 text-white outline-none"
+                          />
+                          <input
+                            type="tel"
+                            placeholder="Driver Phone Number"
+                            value={editForm.driverPhone}
+                            onChange={(e) => setEditForm(f => ({ ...f, driverPhone: e.target.value }))}
+                            className="w-full bg-zinc-900 border border-zinc-800 rounded-lg py-2 px-3 text-white font-mono outline-none"
+                          />
+                          <input
+                            type="text"
+                            placeholder="Vehicle Details (e.g. Toyota Innova KA-01-AB-1234)"
+                            value={editForm.vehicleDetails}
+                            onChange={(e) => setEditForm(f => ({ ...f, vehicleDetails: e.target.value }))}
+                            className="w-full bg-zinc-900 border border-zinc-800 rounded-lg py-2 px-3 text-white outline-none"
+                          />
+                          <textarea
+                            rows={2}
+                            placeholder="Dispatch Notes for Customer..."
+                            value={editForm.adminNotes}
+                            onChange={(e) => setEditForm(f => ({ ...f, adminNotes: e.target.value }))}
+                            className="w-full bg-zinc-900 border border-zinc-800 rounded-lg py-2 px-3 text-white outline-none resize-none"
+                          />
+                        </div>
+
+                        <button
+                          type="submit"
+                          disabled={updatingId === selectedBooking.id}
+                          className="w-full bg-brand-yellow hover:bg-yellow-400 text-brand-dark font-bold py-2.5 rounded-lg transition-all cursor-pointer disabled:opacity-50"
+                        >
+                          {updatingId === selectedBooking.id ? 'Saving Updates...' : 'Save & Sync to Customer'}
+                        </button>
+                      </form>
+                    ) : (
+                      <>
+                        {/* Route Details */}
+                        <div className="space-y-3.5">
+                          <div className="space-y-3 bg-zinc-950 p-4 rounded-xl border border-zinc-800">
+                            <div className="flex items-start gap-3">
+                              <div className="w-2 h-2 bg-emerald-500 rounded-full mt-1.5 shrink-0"></div>
+                              <div>
+                                <span className="text-zinc-500 text-[10px] uppercase font-bold block">Pickup Location</span>
+                                <span className="text-white text-xs font-semibold leading-normal">{selectedBooking.pickup}</span>
+                              </div>
+                            </div>
+                            <div className="flex items-start gap-3 pt-2.5 border-t border-zinc-800/60">
+                              <div className="w-2 h-2 bg-rose-500 rounded-full mt-1.5 shrink-0"></div>
+                              <div>
+                                <span className="text-zinc-500 text-[10px] uppercase font-bold block">Drop Destination</span>
+                                <span className="text-white text-xs font-semibold leading-normal">{selectedBooking.drop}</span>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Booking Timings */}
+                        <div className="grid grid-cols-2 gap-4">
+                          <div className="bg-zinc-950 p-3 rounded-xl border border-zinc-800">
+                            <span className="text-zinc-500 text-[10px] uppercase block font-bold">DATE</span>
+                            <span className="text-white text-sm font-bold font-mono">{selectedBooking.date}</span>
+                          </div>
+                          <div className="bg-zinc-950 p-3 rounded-xl border border-zinc-800">
+                            <span className="text-zinc-500 text-[10px] uppercase block font-bold">TIME</span>
+                            <span className="text-white text-sm font-bold font-mono">{selectedBooking.time}</span>
+                          </div>
+                        </div>
+
+                        {/* Customer Account Details */}
+                        <div className="space-y-3">
+                          <h4 className="text-xs text-zinc-500 font-bold uppercase tracking-widest font-mono">Customer Information</h4>
+                          <div className="bg-zinc-950 p-4 rounded-xl border border-zinc-800 space-y-2 text-xs">
+                            <div>
+                              <span className="text-zinc-500 uppercase text-[9px] block">Full Name</span>
+                              <span className="text-white font-semibold">{selectedBooking.name}</span>
+                            </div>
+                            <div className="pt-2.5 border-t border-zinc-800/60">
+                              <span className="text-zinc-500 uppercase text-[9px] block">Contact Number</span>
+                              <span className="text-white font-mono">{selectedBooking.contact}</span>
+                            </div>
+                            {selectedBooking.customerDetails?.email && (
+                              <div className="pt-2.5 border-t border-zinc-800/60">
+                                <span className="text-zinc-500 uppercase text-[9px] block">Email Address</span>
+                                <span className="text-white font-mono break-all">{selectedBooking.customerDetails.email}</span>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+
+                        {(selectedBooking.driverName || selectedBooking.driverPhone || selectedBooking.vehicleDetails || selectedBooking.adminNotes) && (
+                          <div className="space-y-2">
+                            <h4 className="text-xs text-zinc-500 font-bold uppercase tracking-widest font-mono">Assigned Driver & Notes</h4>
+                            <div className="bg-zinc-950 p-4 rounded-xl border border-zinc-800 space-y-1.5 text-xs">
+                              {selectedBooking.driverName && (
+                                <p className="text-white"><span className="text-zinc-500">Driver:</span> {selectedBooking.driverName}</p>
+                              )}
+                              {selectedBooking.driverPhone && (
+                                <p className="text-white font-mono"><span className="text-zinc-500 font-sans">Phone:</span> {selectedBooking.driverPhone}</p>
+                              )}
+                              {selectedBooking.vehicleDetails && (
+                                <p className="text-white"><span className="text-zinc-500">Vehicle:</span> {selectedBooking.vehicleDetails}</p>
+                              )}
+                              {selectedBooking.adminNotes && (
+                                <p className="text-zinc-300 pt-1 border-t border-zinc-800/60">{selectedBooking.adminNotes}</p>
+                              )}
+                            </div>
                           </div>
                         )}
-                      </div>
-                    </div>
 
-                    {/* Status Management Selector */}
-                    <div className="space-y-3 pt-2">
-                      <h4 className="text-xs text-zinc-500 font-bold uppercase tracking-widest font-mono">Modify Dispatch Status</h4>
-                      <div className="relative">
-                        <select
-                          disabled={updatingId === selectedBooking.id}
-                          value={selectedBooking.status}
-                          onChange={(e) => handleStatusChange(selectedBooking.id, e.target.value)}
-                          className="w-full bg-zinc-950 border border-zinc-800 focus:border-brand-yellow/50 rounded-xl py-3 px-4 text-white text-sm outline-none cursor-pointer appearance-none"
-                        >
-                          <option value="Pending">Pending</option>
-                          <option value="Confirmed">Confirmed</option>
-                          <option value="In Progress">In Progress</option>
-                          <option value="Completed">Completed</option>
-                          <option value="Cancelled">Cancelled</option>
-                        </select>
-                        <ChevronDown className="absolute right-4 top-3.5 w-4 h-4 text-zinc-400 pointer-events-none" />
-                      </div>
-                      {updatingId === selectedBooking.id && (
-                        <p className="text-zinc-500 text-xs font-mono animate-pulse text-center">
-                          Updating status in server...
-                        </p>
-                      )}
-                    </div>
+                        {/* Quick Status Management Selector */}
+                        <div className="space-y-3 pt-2">
+                          <h4 className="text-xs text-zinc-500 font-bold uppercase tracking-widest font-mono">Quick Status Update</h4>
+                          <div className="relative">
+                            <select
+                              disabled={updatingId === selectedBooking.id}
+                              value={selectedBooking.status}
+                              onChange={(e) => handleStatusChange(selectedBooking.id, e.target.value)}
+                              className="w-full bg-zinc-950 border border-zinc-800 focus:border-brand-yellow/50 rounded-xl py-3 px-4 text-white text-sm outline-none cursor-pointer appearance-none"
+                            >
+                              <option value="Pending">Pending</option>
+                              <option value="Confirmed">Confirmed</option>
+                              <option value="Driver Assigned">Driver Assigned</option>
+                              <option value="In Progress">In Progress</option>
+                              <option value="Completed">Completed</option>
+                              <option value="Cancelled">Cancelled</option>
+                            </select>
+                            <ChevronDown className="absolute right-4 top-3.5 w-4 h-4 text-zinc-400 pointer-events-none" />
+                          </div>
+                          {updatingId === selectedBooking.id && (
+                            <p className="text-zinc-500 text-xs font-mono animate-pulse text-center">
+                              Updating status in server...
+                            </p>
+                          )}
+                        </div>
+                      </>
+                    )}
 
                   </div>
                 ) : (

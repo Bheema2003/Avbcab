@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { ServiceType, Booking } from '../types';
 import { 
@@ -10,9 +10,17 @@ interface BookingFormProps {
   onBookingCreated: (booking: Booking) => void;
   currentUser: any | null;
   onUnauthorizedAttempt: (pendingBooking: any) => void;
+  queuedBooking?: any | null;
+  onQueuedBookingConsumed?: () => void;
 }
 
-export default function BookingForm({ onBookingCreated, currentUser, onUnauthorizedAttempt }: BookingFormProps) {
+export default function BookingForm({
+  onBookingCreated,
+  currentUser,
+  onUnauthorizedAttempt,
+  queuedBooking,
+  onQueuedBookingConsumed
+}: BookingFormProps) {
   const [activeTab, setActiveTab] = useState<ServiceType>('Airport');
   
   // Form fields state
@@ -29,9 +37,118 @@ export default function BookingForm({ onBookingCreated, currentUser, onUnauthori
   
   // Status state
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [bookingResult, setBookingResult] = useState<Booking | null>(null);
+  const [pendingBooking, setPendingBooking] = useState<Booking | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
+  const [isTimePickerOpen, setIsTimePickerOpen] = useState(false);
+  const [now, setNow] = useState<Date>(() => new Date());
+  const timePickerRef = useRef<HTMLDivElement>(null);
+
+  const getLocalDateString = (d: Date) => {
+    const year = d.getFullYear();
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  };
+
+  const getLocalTimeString = (d: Date) => {
+    const hours = String(d.getHours()).padStart(2, '0');
+    const minutes = String(d.getMinutes()).padStart(2, '0');
+    return `${hours}:${minutes}`;
+  };
+
+  const todayStr = getLocalDateString(now);
+  const currentHour = now.getHours();
+  const currentMinute = now.getMinutes();
+  const isTodaySelected = !date || date === todayStr;
+
+  // Keep current time fresh and handle click outside time picker
+  useEffect(() => {
+    const interval = setInterval(() => setNow(new Date()), 30000);
+    return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (timePickerRef.current && !timePickerRef.current.contains(e.target as Node)) {
+        setIsTimePickerOpen(false);
+      }
+    };
+    if (isTimePickerOpen) {
+      setNow(new Date());
+      document.addEventListener('mousedown', handleClickOutside);
+    }
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [isTimePickerOpen]);
+
+  const formatDisplayTime = (time24: string) => {
+    if (!time24) return '';
+    const [hStr, mStr] = time24.split(':');
+    const h = Number(hStr);
+    const period = h >= 12 ? 'PM' : 'AM';
+    const h12 = h % 12 === 0 ? 12 : h % 12;
+    return `${String(h12).padStart(2, '0')}:${mStr} ${period}`;
+  };
+
+  const formatHourLabel = (h: number) => {
+    const period = h >= 12 ? 'PM' : 'AM';
+    const h12 = h % 12 === 0 ? 12 : h % 12;
+    return `${String(h12).padStart(2, '0')} ${period}`;
+  };
+
+  const selectedHour = time ? Number(time.split(':')[0]) : null;
+  const selectedMinute = time ? Number(time.split(':')[1]) : null;
+
+  const handleDateChange = (newDate: string) => {
+    if (!newDate) {
+      setDate('');
+      return;
+    }
+    if (newDate < todayStr) {
+      setErrorMessage('Previous dates cannot be selected. Please pick today or a future date.');
+      setDate(todayStr);
+      return;
+    }
+    setErrorMessage(null);
+    setDate(newDate);
+    if (newDate === todayStr && time) {
+      const currentTimeStr = getLocalTimeString(new Date());
+      if (time < currentTimeStr) {
+        setTime('');
+      }
+    }
+  };
+
+  const handleSelectHour = (h: number) => {
+    const freshNow = new Date();
+    const freshToday = getLocalDateString(freshNow);
+    const freshHour = freshNow.getHours();
+    const freshMin = freshNow.getMinutes();
+    const checkToday = !date || date === freshToday;
+
+    if (checkToday && h < freshHour) return;
+
+    let nextMin = selectedMinute ?? 0;
+    if (checkToday && h === freshHour && nextMin < freshMin) {
+      nextMin = freshMin;
+    }
+    setErrorMessage(null);
+    setTime(`${String(h).padStart(2, '0')}:${String(nextMin).padStart(2, '0')}`);
+  };
+
+  const handleSelectMinute = (m: number) => {
+    const freshNow = new Date();
+    const freshToday = getLocalDateString(freshNow);
+    const freshHour = freshNow.getHours();
+    const freshMin = freshNow.getMinutes();
+    const checkToday = !date || date === freshToday;
+
+    const targetHour = selectedHour !== null ? selectedHour : freshHour;
+    if (checkToday && (targetHour < freshHour || (targetHour === freshHour && m < freshMin))) {
+      return;
+    }
+    setErrorMessage(null);
+    setTime(`${String(targetHour).padStart(2, '0')}:${String(m).padStart(2, '0')}`);
+  };
 
   // Auto-fill customer profile details if logged in
   useEffect(() => {
@@ -41,24 +158,21 @@ export default function BookingForm({ onBookingCreated, currentUser, onUnauthori
     }
   }, [currentUser]);
 
-  // Listen for scroll event to dismiss popup when open (Goal 1)
+  // Open Confirmation Required modal automatically when returning from guest Login/Signup
   useEffect(() => {
-    if (!bookingResult) return;
-
-    let initialScrollY = window.scrollY;
-    
-    const handleScroll = () => {
-      // Dismiss popup on scroll of more than 15px
-      if (Math.abs(window.scrollY - initialScrollY) > 15) {
-        handleReset();
-      }
-    };
-
-    window.addEventListener('scroll', handleScroll, { passive: true });
-    return () => {
-      window.removeEventListener('scroll', handleScroll);
-    };
-  }, [bookingResult]);
+    if (currentUser && queuedBooking) {
+      const draftBooking: Booking = {
+        id: queuedBooking.id || 'AVB-T-' + Math.floor(100000 + Math.random() * 900000),
+        status: 'Pending',
+        createdAt: new Date().toLocaleDateString('en-IN'),
+        ...queuedBooking,
+        name: queuedBooking.name || currentUser.name || '',
+        contact: queuedBooking.contact || currentUser.contact || ''
+      };
+      setPendingBooking(draftBooking);
+      onQueuedBookingConsumed?.();
+    }
+  }, [currentUser, queuedBooking]);
 
   // Helper to generate price estimate
   const getPriceEstimate = (): string => {
@@ -80,7 +194,7 @@ export default function BookingForm({ onBookingCreated, currentUser, onUnauthori
   };
 
   const getWhatsAppMessageText = (booking: Booking) => {
-    return `*New Booking Request - AVB CABS* 🚖
+    return `*New Booking Request - AVB CABS*
 ----------------------------------
 *Booking ID:* ${booking.id}
 *Service Type:* ${booking.serviceType}
@@ -94,30 +208,48 @@ export default function BookingForm({ onBookingCreated, currentUser, onUnauthori
 _Please confirm my luxury ride with a professional driver._ Thank you!`;
   };
 
-  const getWhatsAppMessageLink = (booking: Booking) => {
-    const numbers = ['7338653351', '9591128048', '8073166031'];
-    const primaryNum = numbers[0];
-    const text = getWhatsAppMessageText(booking);
-    return `https://wa.me/91${primaryNum}?text=${encodeURIComponent(text)}`;
+  const WHATSAPP_NUMBER = '919591128048';
+
+  const getWhatsAppUrl = (booking: Booking) => {
+    return `https://wa.me/${WHATSAPP_NUMBER}?text=${encodeURIComponent(getWhatsAppMessageText(booking))}`;
   };
 
-  const copyToClipboardAndOpenGroup = (booking: Booking) => {
-    const text = getWhatsAppMessageText(booking);
-    navigator.clipboard.writeText(text).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 4000);
-      window.open('https://chat.whatsapp.com/DvuQSmCGAm8LZa4G9TXOwf', '_blank');
-      // Reset the success popup after 1.5 seconds so it clears out cleanly
+  const handleConfirmAndPost = async () => {
+    if (!pendingBooking || !currentUser || isSubmitting) return;
+
+    setIsSubmitting(true);
+    try {
+      const response = await fetch('/api/bookings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId: currentUser.id,
+          bookingDetails: pendingBooking
+        })
+      });
+
+      const data = await response.json();
+      if (response.ok && data.success) {
+        onBookingCreated(data.booking);
+        setTimeout(() => {
+          handleReset();
+        }, 800);
+      } else {
+        setErrorMessage(data.error || 'Failed to submit booking on database.');
+      }
+    } catch (err) {
+      const localBooking: Booking = {
+        ...pendingBooking,
+        status: 'Pending',
+        createdAt: new Date().toLocaleDateString('en-IN')
+      };
+      onBookingCreated(localBooking);
       setTimeout(() => {
         handleReset();
-      }, 1500);
-    }).catch((err) => {
-      console.error('Failed to copy text', err);
-      window.open('https://chat.whatsapp.com/DvuQSmCGAm8LZa4G9TXOwf', '_blank');
-      setTimeout(() => {
-        handleReset();
-      }, 1500);
-    });
+      }, 800);
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -133,12 +265,21 @@ _Please confirm my luxury ride with a professional driver._ Thank you!`;
       return;
     }
 
+    const latestNow = new Date();
+    const latestToday = getLocalDateString(latestNow);
+    const latestTime = getLocalTimeString(latestNow);
+    if (date < latestToday || (date === latestToday && time < latestTime)) {
+      setErrorMessage('Pickup date and time cannot be in the past. Please select current or future time.');
+      return;
+    }
+
     if (contact.length !== 10 || !/^\d+$/.test(contact)) {
       setErrorMessage('Contact number must be exactly 10 digits.');
       return;
     }
 
     const bookingDetails = {
+      id: 'AVB-T-' + Math.floor(100000 + Math.random() * 900000),
       serviceType: activeTab,
       name,
       contact,
@@ -155,40 +296,12 @@ _Please confirm my luxury ride with a professional driver._ Thank you!`;
       return;
     }
 
-    setIsSubmitting(true);
-
-    try {
-      // Submit directly to express backend database
-      const response = await fetch('/api/bookings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          userId: currentUser.id,
-          bookingDetails
-        })
-      });
-
-      const data = await response.json();
-      if (response.ok && data.success) {
-        setBookingResult(data.booking);
-        onBookingCreated(data.booking);
-      } else {
-        setErrorMessage(data.error || 'Failed to submit booking on database.');
-      }
-    } catch (err) {
-      setErrorMessage('Network connection failed. Saved to local storage fallback instead.');
-      // Local fallback
-      const localBooking: Booking = {
-        id: 'AVB-L-' + Math.floor(100000 + Math.random() * 900000),
-        status: 'Pending',
-        createdAt: new Date().toLocaleDateString('en-IN'),
-        ...bookingDetails
-      };
-      setBookingResult(localBooking);
-      onBookingCreated(localBooking);
-    } finally {
-      setIsSubmitting(false);
-    }
+    // Open Confirmation Required modal first before finalizing & posting to WhatsApp
+    setPendingBooking({
+      ...bookingDetails,
+      status: 'Pending',
+      createdAt: new Date().toLocaleDateString('en-IN')
+    });
   };
 
   const handleReset = () => {
@@ -200,7 +313,7 @@ _Please confirm my luxury ride with a professional driver._ Thank you!`;
     setTime('');
     setReturnDate('');
     setReturnTime('');
-    setBookingResult(null);
+    setPendingBooking(null);
     setErrorMessage(null);
   };
 
@@ -212,9 +325,9 @@ _Please confirm my luxury ride with a professional driver._ Thank you!`;
   ];
 
   return (
-    <div className="w-full bg-zinc-900/80 backdrop-blur-md border border-zinc-800/80 rounded-2xl shadow-2xl overflow-hidden max-w-lg mx-auto">
+    <div className="w-full bg-zinc-900/80 backdrop-blur-md border border-zinc-800/80 rounded-2xl shadow-2xl max-w-lg mx-auto">
       {/* Alert Strip */}
-      <div className="bg-brand-yellow/10 border-b border-brand-yellow/20 px-6 py-2.5 flex items-center justify-between text-xs text-brand-yellow font-medium">
+      <div className="bg-brand-yellow/10 border-b border-brand-yellow/20 rounded-t-2xl px-6 py-2.5 flex items-center justify-between text-xs text-brand-yellow font-medium">
         <span className="flex items-center gap-1.5 font-mono">
           <span className="w-1.5 h-1.5 bg-brand-yellow rounded-full animate-ping"></span>
           OFFER ACTIVE: UP TO 10% DISCOUNT
@@ -376,29 +489,117 @@ _Please confirm my luxury ride with a professional driver._ Thank you!`;
               <div>
                 <label className="block text-zinc-400 text-xs font-semibold mb-1.5">Pickup Date *</label>
                 <div className="relative">
-                  <Calendar className="absolute left-3 top-3 w-4 h-4 text-zinc-500" />
+                  <Calendar className="absolute left-3 top-3 w-4 h-4 text-zinc-500 pointer-events-none" />
                   <input
                     type="date"
                     required
+                    min={todayStr}
                     value={date}
-                    onChange={(e) => setDate(e.target.value)}
-                    className="w-full bg-zinc-950 border border-zinc-800 focus:border-brand-yellow/50 rounded-lg py-2.5 pl-10 pr-4 text-white text-sm outline-none transition-colors font-mono"
+                    onChange={(e) => handleDateChange(e.target.value)}
+                    className="w-full bg-zinc-950 border border-zinc-800 focus:border-brand-yellow/50 rounded-lg py-2.5 pl-10 pr-3 text-white text-sm outline-none transition-colors font-mono [color-scheme:dark]"
                   />
                 </div>
               </div>
 
-              <div>
+              <div ref={timePickerRef} className="relative">
                 <label className="block text-zinc-400 text-xs font-semibold mb-1.5">Pickup Time *</label>
-                <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => setIsTimePickerOpen((prev) => !prev)}
+                  className="w-full bg-zinc-950 border border-zinc-800 focus:border-brand-yellow/50 hover:border-zinc-700 rounded-lg py-2.5 pl-10 pr-3 text-left text-sm outline-none transition-colors font-mono relative cursor-pointer flex items-center justify-between"
+                >
                   <Clock className="absolute left-3 top-3 w-4 h-4 text-zinc-500" />
-                  <input
-                    type="time"
-                    required
-                    value={time}
-                    onChange={(e) => setTime(e.target.value)}
-                    className="w-full bg-zinc-950 border border-zinc-800 focus:border-brand-yellow/50 rounded-lg py-2.5 pl-10 pr-4 text-white text-sm outline-none transition-colors font-mono"
-                  />
-                </div>
+                  <span className={time ? 'text-white' : 'text-zinc-500'}>
+                    {time ? formatDisplayTime(time) : '--:-- --'}
+                  </span>
+                </button>
+
+                {isTimePickerOpen && (
+                  <div className="absolute bottom-full mb-2 right-0 w-64 bg-zinc-950 border border-zinc-800 rounded-xl shadow-2xl p-3 z-40">
+                    <div className="flex items-center justify-between pb-2 mb-2 border-b border-zinc-800">
+                      <span className="text-[10px] font-mono uppercase tracking-wider text-zinc-400 font-bold">
+                        Select Time
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const fresh = new Date();
+                          setNow(fresh);
+                          setTime(getLocalTimeString(fresh));
+                          setIsTimePickerOpen(false);
+                        }}
+                        className="text-[10px] font-mono font-bold text-brand-yellow hover:underline cursor-pointer"
+                      >
+                        Now
+                      </button>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <span className="block text-[10px] text-zinc-500 font-mono uppercase mb-1 px-1">Hour</span>
+                        <div className="max-h-44 overflow-y-auto space-y-0.5 pr-1">
+                          {Array.from({ length: 24 }, (_, h) => {
+                            const disabled = isTodaySelected && h < currentHour;
+                            const isSelected = selectedHour === h;
+                            return (
+                              <button
+                                key={h}
+                                type="button"
+                                disabled={disabled}
+                                onClick={() => handleSelectHour(h)}
+                                className={`w-full text-left px-2 py-1.5 rounded-md text-xs font-mono transition-colors ${
+                                  disabled
+                                    ? 'text-zinc-600 opacity-35 cursor-not-allowed'
+                                    : isSelected
+                                      ? 'bg-brand-yellow text-brand-dark font-bold cursor-pointer'
+                                      : 'text-zinc-200 hover:bg-zinc-800 cursor-pointer'
+                                }`}
+                              >
+                                {formatHourLabel(h)}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+
+                      <div>
+                        <span className="block text-[10px] text-zinc-500 font-mono uppercase mb-1 px-1">Min</span>
+                        <div className="max-h-44 overflow-y-auto space-y-0.5 pr-1">
+                          {Array.from({ length: 60 }, (_, m) => {
+                            const activeHour = selectedHour !== null ? selectedHour : currentHour;
+                            const disabled = isTodaySelected && (activeHour < currentHour || (activeHour === currentHour && m < currentMinute));
+                            const isSelected = selectedMinute === m;
+                            return (
+                              <button
+                                key={m}
+                                type="button"
+                                disabled={disabled}
+                                onClick={() => handleSelectMinute(m)}
+                                className={`w-full text-left px-2 py-1.5 rounded-md text-xs font-mono transition-colors ${
+                                  disabled
+                                    ? 'text-zinc-600 opacity-35 cursor-not-allowed'
+                                    : isSelected
+                                      ? 'bg-brand-yellow text-brand-dark font-bold cursor-pointer'
+                                      : 'text-zinc-200 hover:bg-zinc-800 cursor-pointer'
+                                }`}
+                              >
+                                {String(m).padStart(2, '0')}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => setIsTimePickerOpen(false)}
+                      className="w-full mt-2.5 bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-zinc-200 text-xs font-semibold py-1.5 rounded-lg transition-colors cursor-pointer"
+                    >
+                      Done
+                    </button>
+                  </div>
+                )}
               </div>
             </div>
           </div>
@@ -415,7 +616,7 @@ _Please confirm my luxury ride with a professional driver._ Thank you!`;
               <span className="w-5 h-5 border-2 border-brand-dark border-t-transparent rounded-full animate-spin"></span>
             ) : (
               <>
-                <span>REQUEST LIVERY DISPATCH</span>
+                <span>BOOK YOUR CAB</span>
                 <ChevronRight className="w-4 h-4" />
               </>
             )}
@@ -423,135 +624,126 @@ _Please confirm my luxury ride with a professional driver._ Thank you!`;
         </form>
       </div>
 
-      {/* SUCCESS CONFIRMATION POPUP MODAL (User Request Goal 1) */}
+      {/* CONFIRMATION REQUIRED MODAL (Shown right after clicking BOOK YOUR CAB) */}
       <AnimatePresence>
-        {bookingResult && (
+        {pendingBooking && (
           <div className="fixed inset-0 z-55 flex items-center justify-center p-4">
             {/* Dark glass cover overlay */}
             <motion.div
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              onClick={handleReset}
+              onClick={() => setPendingBooking(null)}
               className="fixed inset-0 bg-black/80 backdrop-blur-md"
             />
 
-            {/* Popup Invoice Receipt */}
+            {/* Confirmation Required Modal */}
             <motion.div
               initial={{ opacity: 0, scale: 0.95, y: 30 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.95, y: 30 }}
-              className="relative bg-zinc-900 border border-emerald-500/30 rounded-2xl w-full max-w-md p-6 sm:p-8 overflow-hidden shadow-2xl z-10 text-left"
+              className="relative bg-zinc-900 border border-emerald-500/25 rounded-2xl w-full max-w-md p-6 sm:p-8 overflow-hidden shadow-2xl z-10 text-left max-h-[92vh] overflow-y-auto"
             >
-              <div className="absolute top-0 left-0 w-full h-1.5 bg-emerald-500" />
-              
+              <div className="absolute top-0 left-0 w-full h-1.5 bg-amber-500" />
+
               {/* Close Button */}
               <button
-                onClick={handleReset}
+                type="button"
+                onClick={() => setPendingBooking(null)}
                 className="absolute top-5 right-5 p-1.5 rounded-lg border border-zinc-800 hover:border-zinc-700 text-zinc-400 hover:text-white transition-all cursor-pointer"
+                title="Edit booking details"
               >
                 <X className="w-4 h-4" />
               </button>
 
               {/* Status Header */}
-              <div className="text-center mb-6">
-                <div className="w-14 h-14 bg-emerald-500/10 border border-emerald-500/30 text-emerald-500 rounded-full flex items-center justify-center mx-auto mb-4 shadow-[0_0_20px_rgba(16,185,129,0.15)]">
-                  <Check className="w-7 h-7 stroke-[2.5]" />
-                </div>
-                
-                <span className="bg-emerald-950 border border-emerald-900/50 text-emerald-400 font-mono text-[10px] font-bold px-3 py-1 rounded-full inline-block mb-2 uppercase tracking-wider">
-                  SUBMISSION SECURED
+              <div className="text-center mb-6 pt-1">
+                <span className="bg-amber-950/90 border border-amber-700/40 text-amber-400 font-mono text-[10px] font-bold px-3.5 py-1 rounded-full inline-block mb-3 uppercase tracking-wider">
+                  CONFIRMATION REQUIRED
                 </span>
 
                 <h3 className="text-2xl font-extrabold font-display text-white tracking-tight">
-                  Booking Submitted Successfully
+                  Confirm Your Ride Schedule
                 </h3>
-                <p className="text-zinc-400 text-xs mt-1.5 font-light leading-relaxed">
-                  Your pickup ride schedule has been logged in our secure database. A dispatcher will assign a professional chauffeur.
+                <p className="text-zinc-400 text-xs mt-2 font-light leading-relaxed max-w-xs mx-auto">
+                  Your ride details are ready. Please click below to send your booking on WhatsApp and finalize your ride.
                 </p>
               </div>
 
-              {/* Ride Summary Invoice Receipt */}
-              <div className="bg-zinc-950 border border-zinc-800/80 rounded-xl p-5 mb-6 text-xs font-mono text-zinc-300 space-y-2.5">
-                <div className="flex justify-between border-b border-zinc-800 pb-2.5 mb-1">
+              {/* Ride Summary Receipt */}
+              <div className="bg-zinc-950 border border-zinc-800/80 rounded-xl p-5 mb-6 text-xs font-mono text-zinc-300 space-y-3">
+                <div className="flex justify-between items-center border-b border-zinc-800 pb-3">
                   <span className="text-zinc-500">BOOKING REFERENCE</span>
-                  <span className="text-brand-yellow font-bold text-sm">{bookingResult.id}</span>
-                </div>
-                
-                <div className="flex justify-between">
-                  <span className="text-zinc-500">SERVICE DETAILS</span>
-                  <span className="text-white font-semibold">{bookingResult.serviceType}</span>
+                  <span className="text-brand-yellow font-bold text-sm">{pendingBooking.id}</span>
                 </div>
 
-                <div className="flex justify-between items-start">
+                <div className="flex justify-between items-center">
+                  <span className="text-zinc-500">SERVICE DETAILS</span>
+                  <span className="text-white font-semibold">{pendingBooking.serviceType}</span>
+                </div>
+
+                <div className="flex justify-between items-start gap-4">
                   <span className="text-zinc-500 shrink-0">PICKUP LOCATION</span>
-                  <span className="text-white font-semibold text-right max-w-[200px] font-sans truncate" title={bookingResult.pickup}>
-                    {bookingResult.pickup}
+                  <span className="text-white font-semibold text-right font-sans break-words" title={pendingBooking.pickup}>
+                    {pendingBooking.pickup}
                   </span>
                 </div>
 
-                {bookingResult.serviceType !== 'Local' && (
-                  <div className="flex justify-between items-start">
+                {pendingBooking.serviceType !== 'Local' && (
+                  <div className="flex justify-between items-start gap-4">
                     <span className="text-zinc-500 shrink-0">DESTINATION</span>
-                    <span className="text-white font-semibold text-right max-w-[200px] font-sans truncate" title={bookingResult.drop}>
-                      {bookingResult.drop}
+                    <span className="text-white font-semibold text-right font-sans break-words" title={pendingBooking.drop}>
+                      {pendingBooking.drop}
                     </span>
                   </div>
                 )}
 
-                <div className="flex justify-between">
-                  <span className="text-zinc-500">SCHEDULE DATE/TIME</span>
-                  <span className="text-white font-semibold">{bookingResult.date} at {bookingResult.time}</span>
+                <div className="flex justify-between items-start gap-4">
+                  <span className="text-zinc-500 shrink-0">SCHEDULE DATE/TIME</span>
+                  <span className="text-white font-semibold text-right">
+                    {pendingBooking.date} at {pendingBooking.time}
+                  </span>
                 </div>
 
-                <div className="flex justify-between border-t border-zinc-800 pt-2.5 mt-1">
+                <div className="flex justify-between items-center border-t border-zinc-800 pt-3">
                   <span className="text-zinc-500 font-bold">DISPATCH STATUS</span>
                   <span className="text-amber-500 font-extrabold flex items-center gap-1.5">
-                    <span className="w-1.5 h-1.5 bg-amber-500 rounded-full animate-ping"></span>
-                    {bookingResult.status}
+                    <span className="w-2 h-2 bg-amber-500 rounded-full"></span>
+                    {pendingBooking.status}
                   </span>
                 </div>
               </div>
 
+              {/* Error message inside modal if save fails */}
+              {errorMessage && (
+                <div className="bg-rose-500/10 border border-rose-500/30 text-rose-400 p-3 rounded-xl text-xs flex items-center gap-2 mb-4">
+                  <AlertCircle className="w-4 h-4 shrink-0" />
+                  <span>{errorMessage}</span>
+                </div>
+              )}
+
               {/* CTA Action Buttons */}
               <div className="flex flex-col gap-3">
-                <p className="text-zinc-500 text-[10px] uppercase font-bold tracking-widest font-mono">Confirm Dispatch Options</p>
-                
-                <motion.button
-                  whileHover={{ scale: 1.01 }}
-                  whileTap={{ scale: 0.99 }}
-                  onClick={() => copyToClipboardAndOpenGroup(bookingResult)}
-                  className="bg-emerald-600 hover:bg-emerald-500 text-white font-extrabold text-sm py-3.5 px-4 rounded-xl transition-all shadow-md flex items-center justify-center gap-2 cursor-pointer relative"
-                >
-                  <MessageSquare className="w-4 h-4 fill-white" />
-                  {copied ? 'COPIED! OPENING WHATSAPP GROUP...' : 'CONFIRM & POST IN AVB CAB GROUP'}
-                </motion.button>
-
-                <p className="text-[11px] text-zinc-400 text-center leading-relaxed font-sans px-1 bg-zinc-900/50 py-2 rounded-lg border border-zinc-800/50">
-                  ⚡ <strong className="text-brand-yellow font-bold">How it works:</strong> Clicking above copies the complete booking details and opens our WhatsApp Group. Just paste and send!
+                <p className="text-zinc-500 text-[10px] uppercase font-bold tracking-widest font-mono">
+                  CONFIRM DISPATCH OPTIONS
                 </p>
 
-                {copied && (
-                  <p className="text-[11px] text-emerald-400 text-center font-semibold font-mono animate-pulse">
-                    ✓ Booking details copied successfully! Paste them in the group.
-                  </p>
-                )}
-
-                <div className="h-[1px] bg-zinc-800/80 my-1" />
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    handleReset();
-                    const historySection = document.querySelector('#my-bookings');
-                    if (historySection) {
-                      historySection.scrollIntoView({ behavior: 'smooth' });
-                    }
-                  }}
-                  className="bg-brand-yellow hover:bg-yellow-400 text-brand-dark font-bold text-sm py-3 px-4 rounded-xl transition-all shadow-md cursor-pointer text-center"
+                <motion.a
+                  whileHover={{ scale: 1.01 }}
+                  whileTap={{ scale: 0.99 }}
+                  href={getWhatsAppUrl(pendingBooking)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={handleConfirmAndPost}
+                  className="bg-emerald-600 hover:bg-emerald-500 text-white font-extrabold text-sm py-3.5 px-4 rounded-xl transition-all shadow-md flex items-center justify-center gap-2.5 cursor-pointer text-center"
                 >
-                  VIEW BOOKING HISTORY
-                </button>
+                  <MessageSquare className="w-4 h-4 fill-white shrink-0" />
+                  <span>{isSubmitting ? 'SAVING & OPENING WHATSAPP...' : 'CONFIRM & SEND ON WHATSAPP'}</span>
+                </motion.a>
+
+                <p className="text-[11px] text-zinc-400 text-center leading-relaxed font-sans px-3 bg-zinc-950/60 py-3 rounded-xl border border-zinc-800/60">
+                  <strong className="text-brand-yellow font-bold">Important:</strong> Clicking above saves your trip to your travel history and opens WhatsApp with your booking details pre-filled—just tap Send!
+                </p>
               </div>
             </motion.div>
           </div>

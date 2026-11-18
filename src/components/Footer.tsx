@@ -1,5 +1,5 @@
 import React from 'react';
-import { Car, Mail, Phone, MessageSquare, Shield, Globe, ArrowUp } from 'lucide-react';
+import { Car, Shield, ArrowUp } from 'lucide-react';
 
 export default function Footer() {
   const handleScrollToTop = () => {
@@ -26,19 +26,6 @@ export default function Footer() {
             <p className="text-zinc-400 text-sm leading-relaxed max-w-sm">
               Premium rides with zero compromise. Your highly trusted partner for all your executive, airport, and long-distance transport requirements across Karnataka.
             </p>
-
-            {/* Social / WhatsApp banner */}
-            <div className="pt-2">
-              <a
-                href="https://chat.whatsapp.com/DvuQSmCGAm8LZa4G9TXOwf"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center gap-2 text-xs font-semibold bg-emerald-600/10 border border-emerald-500/20 text-emerald-400 px-4 py-2.5 rounded-lg hover:bg-emerald-600/20 transition-all"
-              >
-                <MessageSquare className="w-4 h-4 fill-emerald-400/20" />
-                Join WhatsApp Community Link
-              </a>
-            </div>
           </div>
 
           {/* Column 2: Quick Links */}

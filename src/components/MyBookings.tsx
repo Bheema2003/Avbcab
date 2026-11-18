@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Booking } from '../types';
 import { 
@@ -25,6 +25,8 @@ export default function MyBookings({
   onRefreshBookings,
   refreshing
 }: MyBookingsProps) {
+  const [confirmCancelId, setConfirmCancelId] = useState<string | null>(null);
+
   const getStatusColor = (status: Booking['status']) => {
     switch (status) {
       case 'Pending':
@@ -33,6 +35,8 @@ export default function MyBookings({
         return 'bg-sky-500/10 border-sky-500/30 text-sky-400';
       case 'Driver Assigned':
         return 'bg-sky-500/15 border-sky-500/40 text-brand-yellow';
+      case 'In Progress':
+        return 'bg-purple-500/10 border-purple-500/30 text-purple-400';
       case 'Completed':
         return 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400';
       case 'Cancelled':
@@ -42,8 +46,10 @@ export default function MyBookings({
     }
   };
 
-  const getWhatsAppMessageLink = (booking: Booking) => {
-    const text = `*Support Request - AVB CABS* 🚖
+  const WHATSAPP_NUMBER = '919591128048';
+
+  const getSupportWhatsAppUrl = (booking: Booking) => {
+    const text = `*Support Request - AVB CABS*
 ----------------------------------
 *Booking ID:* ${booking.id}
 *Service Type:* ${booking.serviceType}
@@ -52,7 +58,18 @@ export default function MyBookings({
 *Time:* ${booking.time}
 
 _I have a question about my booking. Please connect me to a fleet representative._`;
-    return `https://wa.me/917338653351?text=${encodeURIComponent(text)}`;
+    return `https://wa.me/${WHATSAPP_NUMBER}?text=${encodeURIComponent(text)}`;
+  };
+
+  const getCancelWhatsAppUrl = (booking: Booking) => {
+    const text = `*Cancellation Request - AVB CABS*
+----------------------------------
+*Booking ID:* ${booking.id}
+*Service:* ${booking.serviceType}
+*Date/Time:* ${booking.date} at ${booking.time}
+
+_Please cancel this booking._`;
+    return `https://wa.me/${WHATSAPP_NUMBER}?text=${encodeURIComponent(text)}`;
   };
 
   return (
@@ -166,7 +183,7 @@ _I have a question about my booking. Please connect me to a fleet representative
                       layout
                       key={booking.id}
                       className={`border rounded-2xl overflow-hidden shadow-lg transition-all duration-300 ${
-                        booking.status === 'Confirmed' || booking.status === 'Cancelled' || booking.status === 'Completed'
+                        booking.status === 'Cancelled' || booking.status === 'Completed'
                           ? 'opacity-50 saturate-[0.75] hover:opacity-90 bg-zinc-900/30 border-zinc-950'
                           : 'opacity-100 bg-zinc-900 border border-zinc-800/80 shadow-[0_0_25px_rgba(245,158,11,0.03)] hover:border-zinc-700'
                       }`}
@@ -179,7 +196,7 @@ _I have a question about my booking. Please connect me to a fleet representative
                           <span className="text-xs text-zinc-400 font-mono">Booked on {booking.createdAt ? booking.createdAt.split(',')[0] : 'Today'}</span>
                         </div>
 
-                        <div className="flex items-center gap-3">
+                        <div className="flex items-center gap-3 flex-wrap">
                           <span className={`text-[10px] uppercase font-bold tracking-wider px-2.5 py-1 rounded-full border ${getStatusColor(booking.status)}`}>
                             {booking.status}
                           </span>
@@ -187,6 +204,11 @@ _I have a question about my booking. Please connect me to a fleet representative
                             <span className="text-[10px] font-mono text-zinc-500 flex items-center gap-1">
                               <RefreshCw className="w-3 h-3 animate-spin" />
                               Awaiting Dispatcher
+                            </span>
+                          )}
+                          {booking.updatedAt && (
+                            <span className="text-[10px] font-mono text-emerald-400/90">
+                              Updated by Dispatch
                             </span>
                           )}
                         </div>
@@ -236,14 +258,44 @@ _I have a question about my booking. Please connect me to a fleet representative
                               <span className="text-xs font-semibold font-mono">{booking.time}</span>
                             </div>
                           </div>
+
+                          {/* Admin / Driver Updates if present */}
+                          {(booking.driverName || booking.driverPhone || booking.vehicleDetails || booking.adminNotes) && (
+                            <div className="bg-zinc-950/70 border border-zinc-800/80 rounded-xl p-3.5 space-y-1.5 text-xs">
+                              <span className="text-brand-yellow text-[10px] uppercase font-bold tracking-wider block font-mono">
+                                Dispatch & Driver Info
+                              </span>
+                              {booking.driverName && (
+                                <p className="text-zinc-200"><span className="text-zinc-500">Driver:</span> {booking.driverName}</p>
+                              )}
+                              {booking.driverPhone && (
+                                <p className="text-zinc-200 font-mono">
+                                  <span className="text-zinc-500 font-sans">Driver Contact:</span>{' '}
+                                  <a href={`tel:${booking.driverPhone}`} className="text-brand-yellow hover:underline">{booking.driverPhone}</a>
+                                </p>
+                              )}
+                              {booking.vehicleDetails && (
+                                <p className="text-zinc-200"><span className="text-zinc-500">Vehicle:</span> {booking.vehicleDetails}</p>
+                              )}
+                              {booking.adminNotes && (
+                                <p className="text-zinc-300 pt-1 border-t border-zinc-800/60">{booking.adminNotes}</p>
+                              )}
+                            </div>
+                          )}
                         </div>
 
                         {/* Cost / Dispatcher info */}
-                        <div className="md:col-span-4 bg-zinc-950/50 p-4 rounded-xl border border-zinc-800 flex flex-col justify-center">
+                        <div className="md:col-span-4 bg-zinc-950/50 p-4 rounded-xl border border-zinc-800 flex flex-col justify-center space-y-2">
                           <div>
                             <span className="text-zinc-500 text-[10px] uppercase font-bold tracking-wider block font-mono">SERVICE TYPE</span>
                             <span className="text-brand-yellow text-sm font-bold block">{booking.serviceType}</span>
                           </div>
+                          {booking.priceEstimate && (
+                            <div className="pt-2 border-t border-zinc-800/60">
+                              <span className="text-zinc-500 text-[10px] uppercase font-bold tracking-wider block font-mono">FARE ESTIMATE</span>
+                              <span className="text-white text-xs font-semibold block">{booking.priceEstimate}</span>
+                            </div>
+                          )}
                         </div>
                       </div>
 
@@ -251,7 +303,7 @@ _I have a question about my booking. Please connect me to a fleet representative
                       <div className="bg-zinc-950/60 px-6 py-4 border-t border-zinc-800/40 flex flex-wrap gap-3 items-center justify-between">
                         <div className="flex flex-wrap gap-3">
                           <a
-                            href={getWhatsAppMessageLink(booking)}
+                            href={getSupportWhatsAppUrl(booking)}
                             target="_blank"
                             rel="noopener noreferrer"
                             className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs px-4 py-2.5 rounded-lg transition-colors flex items-center gap-1.5"
@@ -260,7 +312,7 @@ _I have a question about my booking. Please connect me to a fleet representative
                             Chat Support
                           </a>
                           <a
-                            href="tel:7338653351"
+                            href="tel:8073166031"
                             className="bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white font-semibold text-xs px-4 py-2.5 rounded-lg transition-all border border-zinc-750 flex items-center gap-1.5"
                           >
                             <Phone className="w-3.5 h-3.5 text-brand-yellow" />
@@ -269,31 +321,39 @@ _I have a question about my booking. Please connect me to a fleet representative
                         </div>
 
                         {booking.status !== 'Cancelled' && booking.status !== 'Completed' && (
-                          <button
-                            onClick={() => {
-                              if (confirm('Are you sure you want to cancel this booking? There are no cancellation fees.')) {
-                                onCancelBooking(booking.id);
-                                
-                                // Prepare cancellation text to copy
-                                const cancelText = `*Cancellation Request - AVB CABS* 🚖\n----------------------------------\n*Booking ID:* ${booking.id}\n*Service:* ${booking.serviceType}\n*Date/Time:* ${booking.date} at ${booking.time}\n\n_Please cancel this booking._`;
-                                
-                                try {
-                                  navigator.clipboard.writeText(cancelText).then(() => {
-                                    alert('Booking status set to Cancelled on our database. Cancellation details have been copied to your clipboard. We are now opening our WhatsApp Group so you can paste and notify our dispatch team instantly.');
-                                    window.open('https://chat.whatsapp.com/DvuQSmCGAm8LZa4G9TXOwf', '_blank');
-                                  }).catch(() => {
-                                    window.open('https://chat.whatsapp.com/DvuQSmCGAm8LZa4G9TXOwf', '_blank');
-                                  });
-                                } catch (err) {
-                                  window.open('https://chat.whatsapp.com/DvuQSmCGAm8LZa4G9TXOwf', '_blank');
-                                }
-                              }
-                            }}
-                            className="text-red-400 hover:text-red-300 font-semibold text-xs py-2 px-3 hover:bg-red-500/10 rounded-md transition-all flex items-center gap-1 cursor-pointer"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                            Cancel Booking
-                          </button>
+                          confirmCancelId === booking.id ? (
+                            <div className="flex items-center gap-2">
+                              <a
+                                href={getCancelWhatsAppUrl(booking)}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                onClick={() => {
+                                  setConfirmCancelId(null);
+                                  onCancelBooking(booking.id);
+                                }}
+                                className="bg-red-600 hover:bg-red-500 text-white font-bold text-xs py-2 px-3 rounded-lg transition-all flex items-center gap-1.5 cursor-pointer"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                                Confirm & Send on WhatsApp
+                              </a>
+                              <button
+                                type="button"
+                                onClick={() => setConfirmCancelId(null)}
+                                className="text-zinc-400 hover:text-white text-xs font-semibold py-2 px-2.5 rounded-lg border border-zinc-700 hover:border-zinc-600 transition-all cursor-pointer"
+                              >
+                                Keep
+                              </button>
+                            </div>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => setConfirmCancelId(booking.id)}
+                              className="text-red-400 hover:text-red-300 font-semibold text-xs py-2 px-3 hover:bg-red-500/10 rounded-md transition-all flex items-center gap-1 cursor-pointer"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                              Cancel Booking
+                            </button>
+                          )
                         )}
                       </div>
                     </motion.div>

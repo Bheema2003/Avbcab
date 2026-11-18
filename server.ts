@@ -188,8 +188,9 @@ app.post('/api/sync', async (req, res) => {
       const currentBookings = await readBookings();
       const bookingMap = new Map(currentBookings.map(b => [b.id, b]));
       bookings.forEach(b => {
-        if (b && b.id) {
-          bookingMap.set(b.id, Object.assign({}, bookingMap.get(b.id) || {}, b));
+        // Only restore bookings missing from server storage; never overwrite server updates with stale client cache
+        if (b && b.id && !bookingMap.has(b.id)) {
+          bookingMap.set(b.id, b);
         }
       });
       await writeBookings(Array.from(bookingMap.values()));
@@ -199,8 +200,8 @@ app.post('/api/sync', async (req, res) => {
       const currentUsers = await readUsers();
       const userMap = new Map(currentUsers.map(u => [u.id, u]));
       users.forEach(u => {
-        if (u && u.id) {
-          userMap.set(u.id, Object.assign({}, userMap.get(u.id) || {}, u));
+        if (u && u.id && !userMap.has(u.id)) {
+          userMap.set(u.id, u);
         }
       });
       await writeUsers(Array.from(userMap.values()));
@@ -382,7 +383,7 @@ app.put('/api/admin/bookings/:id/status', async (req, res) => {
   const { id } = req.params;
   const { status } = req.body;
 
-  const allowedStatuses = ['Pending', 'Confirmed', 'In Progress', 'Completed', 'Cancelled'];
+  const allowedStatuses = ['Pending', 'Confirmed', 'Driver Assigned', 'In Progress', 'Completed', 'Cancelled'];
   if (!allowedStatuses.includes(status)) {
     return res.status(400).json({ error: 'Invalid status.' });
   }
@@ -394,6 +395,62 @@ app.put('/api/admin/bookings/:id/status', async (req, res) => {
   }
 
   bookings[index].status = status;
+  bookings[index].updatedAt = new Date().toISOString();
+  await writeBookings(bookings);
+
+  res.json({ success: true, booking: bookings[index] });
+});
+
+// Update Full Booking Details (Admin)
+app.put('/api/admin/bookings/:id', async (req, res) => {
+  const token = req.headers.authorization;
+  if (token !== ADMIN_TOKEN) {
+    return res.status(403).json({ error: 'Unauthorized. Access Denied.' });
+  }
+
+  const { id } = req.params;
+  const {
+    serviceType,
+    pickup,
+    drop,
+    date,
+    time,
+    status,
+    priceEstimate,
+    driverName,
+    driverPhone,
+    vehicleDetails,
+    adminNotes
+  } = req.body;
+
+  const allowedStatuses = ['Pending', 'Confirmed', 'Driver Assigned', 'In Progress', 'Completed', 'Cancelled'];
+  if (status !== undefined && !allowedStatuses.includes(status)) {
+    return res.status(400).json({ error: 'Invalid status.' });
+  }
+
+  const bookings = await readBookings();
+  const index = bookings.findIndex(b => b.id === id);
+  if (index === -1) {
+    return res.status(404).json({ error: 'Booking not found.' });
+  }
+
+  const current = bookings[index];
+  bookings[index] = {
+    ...current,
+    ...(serviceType !== undefined ? { serviceType } : {}),
+    ...(pickup !== undefined ? { pickup } : {}),
+    ...(drop !== undefined ? { drop } : {}),
+    ...(date !== undefined ? { date } : {}),
+    ...(time !== undefined ? { time } : {}),
+    ...(status !== undefined ? { status } : {}),
+    ...(priceEstimate !== undefined ? { priceEstimate } : {}),
+    ...(driverName !== undefined ? { driverName } : {}),
+    ...(driverPhone !== undefined ? { driverPhone } : {}),
+    ...(vehicleDetails !== undefined ? { vehicleDetails } : {}),
+    ...(adminNotes !== undefined ? { adminNotes } : {}),
+    updatedAt: new Date().toISOString()
+  };
+
   await writeBookings(bookings);
 
   res.json({ success: true, booking: bookings[index] });

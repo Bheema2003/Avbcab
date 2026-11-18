@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Car, Phone, Menu, X, MessageSquare, ShieldCheck, User, LogOut } from 'lucide-react';
+import { Car, Menu, X, MessageSquare, ShieldCheck, User, LogOut } from 'lucide-react';
 
 interface HeaderProps {
   activeSection: string;
@@ -151,14 +151,6 @@ export default function Header({
                 )}
               </div>
             )}
-
-            <a 
-              href="tel:7338653351"
-              className="flex items-center gap-2 text-gray-300 hover:text-brand-yellow transition-colors font-mono text-xs border border-zinc-800 hover:border-brand-yellow/30 px-3 py-2 rounded-lg bg-zinc-900/40"
-            >
-              <Phone className="w-3.5 h-3.5 text-brand-yellow" />
-              7338653351
-            </a>
           </div>
 
           {/* Mobile Menu Trigger */}
@@ -253,14 +245,6 @@ export default function Header({
                       </button>
                     </div>
                   )}
-
-                  <a 
-                    href="tel:7338653351"
-                    className="flex items-center justify-center gap-3 text-zinc-300 hover:text-brand-yellow py-2.5 font-mono text-sm border border-zinc-800 bg-zinc-950/40 rounded-lg"
-                  >
-                    <Phone className="w-4 h-4 text-brand-yellow" />
-                    +91 7338653351
-                  </a>
                 </div>
               )}
             </div>

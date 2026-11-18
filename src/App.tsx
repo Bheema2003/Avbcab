@@ -115,32 +115,48 @@ export default function App() {
     }
   }, [bookings, currentUser]);
 
-  // Sync Bookings from Server
-  const fetchMyBookings = async (userId: string) => {
-    setRefreshing(true);
+  // Sync Bookings from Server (server is authoritative so Admin Dashboard updates always reflect)
+  const fetchMyBookings = async (userId: string, silent = false) => {
+    if (!silent) {
+      setRefreshing(true);
+    }
     try {
-      const response = await fetch(`/api/bookings/my?userId=${userId}`);
+      const response = await fetch(`/api/bookings/my?userId=${encodeURIComponent(userId)}`, {
+        cache: 'no-store'
+      });
       const data = await response.json();
       if (response.ok && data.success) {
-        // Merge with client-side durable statuses in case server has restarted but not fully synced yet
+        const serverBookings: Booking[] = Array.isArray(data.bookings) ? data.bookings : [];
+        const serverIds = new Set(serverBookings.map(b => b.id));
+
+        // Preserve only offline-created local bookings for this user that haven't reached the server yet
         const existingDurableStr = localStorage.getItem('avb_durable_bookings') || '[]';
-        let mergedBookings = data.bookings;
+        let localOnlyBookings: Booking[] = [];
         try {
           const existingDurable = JSON.parse(existingDurableStr);
-          if (Array.isArray(existingDurable) && existingDurable.length > 0) {
-            const backupMap = new Map(existingDurable.map((b: any) => [b.id, b]));
-            mergedBookings = data.bookings.map((b: any) => {
-              const backup = backupMap.get(b.id);
-              if (backup) {
-                return { ...b, ...backup };
-              }
-              return b;
-            });
+          if (Array.isArray(existingDurable)) {
+            localOnlyBookings = existingDurable.filter(
+              (b: any) => b && b.id && !serverIds.has(b.id) && b.userId === userId
+            );
           }
         } catch (err) {}
 
+        const mergedBookings = [...serverBookings, ...localOnlyBookings];
+
         setBookings(mergedBookings);
         localStorage.setItem('avb_bookings', JSON.stringify(mergedBookings));
+
+        // Update durable store with fresh authoritative server bookings
+        try {
+          const existingDurable = JSON.parse(existingDurableStr);
+          const durableMap = new Map(
+            Array.isArray(existingDurable) ? existingDurable.map((b: any) => [b.id, b]) : []
+          );
+          serverBookings.forEach(b => {
+            durableMap.set(b.id, b);
+          });
+          localStorage.setItem('avb_durable_bookings', JSON.stringify(Array.from(durableMap.values())));
+        } catch (err) {}
       }
     } catch (e) {
       console.error('Failed to sync bookings from server.', e);
@@ -152,9 +168,44 @@ export default function App() {
         } catch (err) {}
       }
     } finally {
-      setRefreshing(false);
+      if (!silent) {
+        setRefreshing(false);
+      }
     }
   };
+
+  // Auto-sync customer booking history on focus, cross-tab updates, and background interval
+  useEffect(() => {
+    if (!currentUser || isAdminMode) return;
+
+    const refreshSilent = () => {
+      fetchMyBookings(currentUser.id, true);
+    };
+
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        refreshSilent();
+      }
+    };
+
+    const handleStorage = (e: StorageEvent) => {
+      if (e.key === 'avb_durable_bookings') {
+        refreshSilent();
+      }
+    };
+
+    window.addEventListener('focus', refreshSilent);
+    document.addEventListener('visibilitychange', handleVisibility);
+    window.addEventListener('storage', handleStorage);
+    const interval = setInterval(refreshSilent, 8000);
+
+    return () => {
+      window.removeEventListener('focus', refreshSilent);
+      document.removeEventListener('visibilitychange', handleVisibility);
+      window.removeEventListener('storage', handleStorage);
+      clearInterval(interval);
+    };
+  }, [currentUser?.id, isAdminMode]);
 
   // Sync Reviews from Server
   const fetchReviews = async () => {
@@ -194,10 +245,10 @@ export default function App() {
         // Refresh bookings
         fetchMyBookings(currentUser.id);
       } else {
-        alert(data.error || 'Failed to cancel booking.');
+        console.error(data.error || 'Failed to cancel booking.');
       }
     } catch (e) {
-      alert('Network failure. Failed to cancel booking.');
+      console.error('Network failure. Failed to cancel booking.', e);
     }
   };
 
@@ -241,47 +292,15 @@ export default function App() {
   };
 
   // Login Success Callback
-  const handleLoginSuccess = async (user: any) => {
+  const handleLoginSuccess = (user: any) => {
     setCurrentUser(user);
     localStorage.setItem('avb_user', JSON.stringify(user));
-
-    // If there is a queued booking from this login prompt, submit it right now!
-    if (pendingBookingToSubmit) {
-      const bDetails = pendingBookingToSubmit;
-      setPendingBookingToSubmit(null);
-      try {
-        const response = await fetch('/api/bookings', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            userId: user.id,
-            bookingDetails: bDetails
-          })
-        });
-        const data = await response.json();
-        if (response.ok && data.success) {
-          handleBookingCreated(data.booking);
-          // Trigger success confirmation pop-up on BookingForm widget manually or via a state!
-          // Since the Success Modal is nested inside BookingForm, we can pass down the result as prop
-          // or simple alert. But since BookingForm holds bookingResult, let's just let them know 
-          // they are logged in and can click "Request Livery Dispatch" now!
-          alert(`Successfully logged in as ${user.name}! Please click the "REQUEST LIVERY DISPATCH" button to secure your booking.`);
-        }
-      } catch (err) {
-        console.error('Failed to submit queued booking.', err);
-      }
-    }
   };
 
   // Signup Success Callback
   const handleSignupSuccess = (user: any) => {
     setCurrentUser(user);
     localStorage.setItem('avb_user', JSON.stringify(user));
-
-    if (pendingBookingToSubmit) {
-      setPendingBookingToSubmit(null);
-      alert(`Account created successfully! Welcome ${user.name}. Please click the "REQUEST LIVERY DISPATCH" button to secure your booking.`);
-    }
   };
 
   // Admin Login Success Callback
@@ -301,6 +320,9 @@ export default function App() {
 
   const handleExitAdminMode = () => {
     setIsAdminMode(false);
+    if (currentUser) {
+      fetchMyBookings(currentUser.id);
+    }
   };
 
   const handleAdminClick = () => {
@@ -426,31 +448,13 @@ export default function App() {
                       </span>
                     </motion.div>
 
-                    {/* Direct Support Numbers */}
+                    {/* Direct Support Email */}
                     <motion.div 
                       initial={{ opacity: 0, y: 15 }}
                       animate={{ opacity: 1, y: 0 }}
                       transition={{ duration: 0.5, delay: 0.4 }}
                       className="pt-6 border-t border-zinc-800/80 max-w-md space-y-4"
                     >
-                      <div>
-                        <h3 className="text-zinc-500 text-[11px] uppercase tracking-widest font-bold font-mono mb-1.5">Direct Booking Desk</h3>
-                        <div className="flex flex-col sm:flex-row sm:items-center gap-3">
-                          <a 
-                            href="tel:7338653351"
-                            className="text-2xl sm:text-3xl font-extrabold text-white font-mono tracking-tight hover:text-brand-yellow transition-colors block"
-                          >
-                            7338653351
-                          </a>
-                          <span className="hidden sm:inline text-zinc-700 font-sans">|</span>
-                          <div className="flex flex-wrap gap-x-3 text-sm text-zinc-400 font-mono">
-                            <a href="tel:9591128048" className="hover:text-brand-yellow transition-colors">9591128048</a>
-                            <span>•</span>
-                            <a href="tel:8073166031" className="hover:text-brand-yellow transition-colors">8073166031</a>
-                          </div>
-                        </div>
-                      </div>
-
                       <div className="flex items-center gap-2 text-zinc-400 text-sm">
                         <Mail className="w-4 h-4 text-brand-yellow" />
                         <a href="mailto:avbcabz@gmail.com" className="hover:text-white transition-colors font-mono">
@@ -466,6 +470,8 @@ export default function App() {
                       onBookingCreated={handleBookingCreated} 
                       currentUser={currentUser}
                       onUnauthorizedAttempt={handleUnauthorizedAttempt}
+                      queuedBooking={pendingBookingToSubmit}
+                      onQueuedBookingConsumed={() => setPendingBookingToSubmit(null)}
                     />
                   </div>
 
