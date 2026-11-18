@@ -5,27 +5,78 @@ mongoose.set('bufferCommands', false);
 
 // Connect to MongoDB Atlas if MONGODB_URI is provided
 let isConnected = false;
+let authFailed = false;
+let hasLoggedFallback = false;
+let lastFailureAt = 0;
+let connectionPromise: Promise<boolean> | null = null;
+let errorListenerAttached = false;
 
-export const connectDB = async () => {
-  const uri = process.env.MONGODB_URI;
+const RETRY_COOLDOWN_MS = 60_000;
+
+export const connectDB = async (): Promise<boolean> => {
+  const uri = process.env.MONGODB_URI?.trim();
   if (!uri) {
-    console.log('MongoDB: No MONGODB_URI provided. Falling back to local JSON files.');
+    if (!hasLoggedFallback) {
+      hasLoggedFallback = true;
+      console.log('MongoDB: No MONGODB_URI provided. Using local JSON storage.');
+    }
     return false;
   }
 
-  if (isConnected) {
+  if (isConnected && mongoose.connection.readyState === 1) {
     return true;
   }
 
-  try {
-    await mongoose.connect(uri, { serverSelectionTimeoutMS: 2000 });
-    isConnected = true;
-    console.log('MongoDB: Successfully connected to MongoDB Atlas!');
-    return true;
-  } catch (error) {
-    console.warn('MongoDB: Connection failed, falling back to local storage:', error);
+  if (authFailed) {
     return false;
   }
+
+  if (lastFailureAt && Date.now() - lastFailureAt < RETRY_COOLDOWN_MS) {
+    return false;
+  }
+
+  if (connectionPromise) {
+    return connectionPromise;
+  }
+
+  if (!errorListenerAttached) {
+    errorListenerAttached = true;
+    mongoose.connection.on('error', () => {
+      isConnected = false;
+    });
+    mongoose.connection.on('disconnected', () => {
+      isConnected = false;
+    });
+  }
+
+  connectionPromise = (async () => {
+    try {
+      await mongoose.connect(uri, { serverSelectionTimeoutMS: 5000 });
+      isConnected = true;
+      console.log('MongoDB: Connected to MongoDB Atlas.');
+      return true;
+    } catch (error: any) {
+      isConnected = false;
+      lastFailureAt = Date.now();
+      const message = String(error?.message || '');
+      if (
+        error?.code === 8000 ||
+        /bad auth|authentication failed|auth failed/i.test(message)
+      ) {
+        authFailed = true;
+      }
+      await mongoose.disconnect().catch(() => {});
+      if (!hasLoggedFallback) {
+        hasLoggedFallback = true;
+        console.log('MongoDB unavailable; using local JSON storage fallback.');
+      }
+      return false;
+    } finally {
+      connectionPromise = null;
+    }
+  })();
+
+  return connectionPromise;
 };
 
 // --- MONGODB SCHEMAS & MODELS ---

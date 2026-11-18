@@ -41,10 +41,19 @@ export function LoginModal({ isOpen, onClose, onSuccess, onSwitchToSignUp }: Aut
     setError(null);
 
     try {
+      const normalizedEmail = email.toLowerCase().trim();
+      let durableUser: any = undefined;
+      try {
+        const list = JSON.parse(localStorage.getItem('avb_durable_users') || '[]');
+        if (Array.isArray(list)) {
+          durableUser = list.find((u: any) => u?.email?.toLowerCase().trim() === normalizedEmail);
+        }
+      } catch {}
+
       const response = await fetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password })
+        body: JSON.stringify({ email, password, durableUser })
       });
       const data = await response.json();
 
@@ -54,6 +63,15 @@ export function LoginModal({ isOpen, onClose, onSuccess, onSwitchToSignUp }: Aut
         } else {
           localStorage.removeItem('avb_saved_credentials');
         }
+        try {
+          const list = JSON.parse(localStorage.getItem('avb_durable_users') || '[]');
+          const arr = Array.isArray(list) ? list : [];
+          const idx = arr.findIndex((u: any) => u?.id === data.user.id || u?.email === data.user.email);
+          const durableRecord = { ...data.user, password };
+          if (idx >= 0) arr[idx] = durableRecord;
+          else arr.push(durableRecord);
+          localStorage.setItem('avb_durable_users', JSON.stringify(arr));
+        } catch {}
         onSuccess(data.user);
         onClose();
       } else {
@@ -227,8 +245,17 @@ export function SignupModal({ isOpen, onClose, onSuccess, onSwitchToLogin }: Aut
       const data = await response.json();
 
       if (response.ok && data.success) {
-        // Save the newly created credentials for easy next-time login
+        // Save the newly created credentials & durable user profile for reliable next-time login
         localStorage.setItem('avb_saved_credentials', JSON.stringify({ email, password }));
+        try {
+          const list = JSON.parse(localStorage.getItem('avb_durable_users') || '[]');
+          const arr = Array.isArray(list) ? list : [];
+          const idx = arr.findIndex((u: any) => u?.id === data.user.id || u?.email === data.user.email);
+          const durableRecord = { ...data.user, password };
+          if (idx >= 0) arr[idx] = durableRecord;
+          else arr.push(durableRecord);
+          localStorage.setItem('avb_durable_users', JSON.stringify(arr));
+        } catch {}
         onSuccess(data.user);
         onClose();
       } else {
@@ -490,7 +517,7 @@ export function AdminLoginModal({ isOpen, onClose, onSuccess }: AdminLoginProps)
                   <input
                     type="text"
                     required
-                    placeholder="Username (e.g. admin)"
+                    placeholder="Username (e.g. avbcabz)"
                     value={username}
                     onChange={(e) => setUsername(e.target.value)}
                     className="w-full bg-zinc-950 border border-zinc-800 focus:border-brand-yellow/40 rounded-xl py-3 pl-11 pr-4 text-white text-sm outline-none transition-colors"

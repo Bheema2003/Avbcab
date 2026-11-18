@@ -27,22 +27,50 @@ export default function MyBookings({
 }: MyBookingsProps) {
   const [confirmCancelId, setConfirmCancelId] = useState<string | null>(null);
 
-  const getStatusColor = (status: Booking['status']) => {
+  const getStatusMeta = (status: Booking['status']) => {
     switch (status) {
       case 'Pending':
-        return 'bg-amber-500/10 border-amber-500/30 text-amber-500';
+        return {
+          badge: 'bg-yellow-500/15 border-yellow-400/40 text-yellow-300',
+          dot: 'bg-yellow-400',
+          borderAccent: 'border-l-yellow-400'
+        };
       case 'Confirmed':
-        return 'bg-sky-500/10 border-sky-500/30 text-sky-400';
+        return {
+          badge: 'bg-emerald-500/15 border-emerald-500/40 text-emerald-400',
+          dot: 'bg-emerald-400',
+          borderAccent: 'border-l-emerald-500'
+        };
       case 'Driver Assigned':
-        return 'bg-sky-500/15 border-sky-500/40 text-brand-yellow';
+        return {
+          badge: 'bg-sky-500/15 border-sky-400/40 text-sky-400',
+          dot: 'bg-sky-400',
+          borderAccent: 'border-l-sky-400'
+        };
       case 'In Progress':
-        return 'bg-purple-500/10 border-purple-500/30 text-purple-400';
+        return {
+          badge: 'bg-purple-500/15 border-purple-400/40 text-purple-300',
+          dot: 'bg-purple-400',
+          borderAccent: 'border-l-purple-400'
+        };
       case 'Completed':
-        return 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400';
+        return {
+          badge: 'bg-emerald-500/20 border-emerald-400/50 text-emerald-300',
+          dot: 'bg-emerald-400',
+          borderAccent: 'border-l-emerald-400'
+        };
       case 'Cancelled':
-        return 'bg-red-500/10 border-red-500/30 text-red-500';
+        return {
+          badge: 'bg-red-500/15 border-red-500/40 text-red-400',
+          dot: 'bg-red-500',
+          borderAccent: 'border-l-red-500'
+        };
       default:
-        return 'bg-zinc-800 text-zinc-300';
+        return {
+          badge: 'bg-zinc-800 border-zinc-700 text-zinc-300',
+          dot: 'bg-zinc-400',
+          borderAccent: 'border-l-zinc-600'
+        };
     }
   };
 
@@ -178,14 +206,16 @@ _Please cancel this booking._`;
                 </motion.div>
               ) : (
                 <div className="space-y-6">
-                  {bookings.map((booking) => (
+                  {bookings.map((booking) => {
+                    const statusMeta = getStatusMeta(booking.status);
+                    return (
                     <motion.div
                       layout
                       key={booking.id}
-                      className={`border rounded-2xl overflow-hidden shadow-lg transition-all duration-300 ${
+                      className={`border border-l-4 ${statusMeta.borderAccent} rounded-2xl overflow-hidden shadow-lg transition-all duration-300 ${
                         booking.status === 'Cancelled' || booking.status === 'Completed'
-                          ? 'opacity-50 saturate-[0.75] hover:opacity-90 bg-zinc-900/30 border-zinc-950'
-                          : 'opacity-100 bg-zinc-900 border border-zinc-800/80 shadow-[0_0_25px_rgba(245,158,11,0.03)] hover:border-zinc-700'
+                          ? 'bg-zinc-900/50 border-zinc-800/70 hover:bg-zinc-900/80'
+                          : 'bg-zinc-900 border-zinc-800/80 shadow-[0_0_25px_rgba(245,158,11,0.03)] hover:border-zinc-700'
                       }`}
                     >
                       {/* Top Bar */}
@@ -197,7 +227,8 @@ _Please cancel this booking._`;
                         </div>
 
                         <div className="flex items-center gap-3 flex-wrap">
-                          <span className={`text-[10px] uppercase font-bold tracking-wider px-2.5 py-1 rounded-full border ${getStatusColor(booking.status)}`}>
+                          <span className={`inline-flex items-center gap-1.5 text-[11px] uppercase font-bold tracking-wider px-3 py-1 rounded-full border ${statusMeta.badge}`}>
+                            <span className={`w-1.5 h-1.5 rounded-full ${statusMeta.dot}`} />
                             {booking.status}
                           </span>
                           {booking.status === 'Pending' && (
@@ -233,21 +264,23 @@ _Please cancel this booking._`;
                               </div>
                             </div>
 
-                            {/* Drop Address */}
-                            {booking.serviceType !== 'Local' && (
+                            {/* Drop Address / Package */}
+                            {booking.drop && (
                               <div className="relative">
                                 <div className="absolute -left-[23px] top-[4px] w-3.5 h-3.5 rounded-full bg-emerald-500/20 border border-emerald-500 flex items-center justify-center">
                                   <div className="w-1.5 h-1.5 bg-emerald-500 rounded-full" />
                                 </div>
                                 <div>
-                                  <span className="text-zinc-500 text-[10px] uppercase font-bold tracking-wider block">Destination</span>
+                                  <span className="text-zinc-500 text-[10px] uppercase font-bold tracking-wider block">
+                                    {booking.serviceType === 'Local' ? 'Rental Package' : 'Destination'}
+                                  </span>
                                   <span className="text-white text-sm font-medium">{booking.drop}</span>
                                 </div>
                               </div>
                             )}
                           </div>
 
-                          {/* Schedule details */}
+                          {/* Schedule & Passenger details */}
                           <div className="flex flex-wrap gap-6 pt-2">
                             <div className="flex items-center gap-2 text-zinc-300">
                               <Calendar className="w-4 h-4 text-brand-yellow" />
@@ -257,6 +290,12 @@ _Please cancel this booking._`;
                               <Clock className="w-4 h-4 text-brand-yellow" />
                               <span className="text-xs font-semibold font-mono">{booking.time}</span>
                             </div>
+                            {booking.name && (
+                              <div className="flex items-center gap-2 text-zinc-300">
+                                <User className="w-4 h-4 text-brand-yellow" />
+                                <span className="text-xs font-semibold">{booking.name} ({booking.contact})</span>
+                              </div>
+                            )}
                           </div>
 
                           {/* Admin / Driver Updates if present */}
@@ -294,6 +333,14 @@ _Please cancel this booking._`;
                             <div className="pt-2 border-t border-zinc-800/60">
                               <span className="text-zinc-500 text-[10px] uppercase font-bold tracking-wider block font-mono">FARE ESTIMATE</span>
                               <span className="text-white text-xs font-semibold block">{booking.priceEstimate}</span>
+                            </div>
+                          )}
+                          {booking.finalAmount && Number(String(booking.finalAmount).replace(/,/g, '').trim()) > 0 && (
+                            <div className="pt-2 border-t border-zinc-800/60">
+                              <span className="text-emerald-400 text-[10px] uppercase font-bold tracking-wider block font-mono">FINAL AMOUNT</span>
+                              <span className="text-emerald-300 text-sm font-bold font-mono block">
+                                ₹{Number(String(booking.finalAmount).replace(/,/g, '').trim()).toLocaleString('en-IN')}
+                              </span>
                             </div>
                           )}
                         </div>
@@ -357,7 +404,8 @@ _Please cancel this booking._`;
                         )}
                       </div>
                     </motion.div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </motion.div>

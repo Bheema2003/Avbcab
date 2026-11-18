@@ -59,22 +59,33 @@ export default function App() {
   useEffect(() => {
     const syncLocalBackupToServer = async () => {
       const backupBookingsStr = localStorage.getItem('avb_durable_bookings');
-      if (backupBookingsStr) {
+      const backupUsersStr = localStorage.getItem('avb_durable_users');
+      let backupBookings: any[] = [];
+      let backupUsers: any[] = [];
+      try {
+        if (backupBookingsStr) {
+          const parsed = JSON.parse(backupBookingsStr);
+          if (Array.isArray(parsed)) backupBookings = parsed;
+        }
+      } catch {}
+      try {
+        if (backupUsersStr) {
+          const parsed = JSON.parse(backupUsersStr);
+          if (Array.isArray(parsed)) backupUsers = parsed;
+        }
+      } catch {}
+
+      if (backupBookings.length > 0 || backupUsers.length > 0) {
         try {
-          const backupBookings = JSON.parse(backupBookingsStr);
-          if (Array.isArray(backupBookings) && backupBookings.length > 0) {
-            const response = await fetch('/api/sync', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ bookings: backupBookings })
-            });
-            const data = await response.json();
-            if (response.ok && data.success) {
-              console.log('Successfully synchronized client-side durable booking statuses with the server.');
-              // If logged in, fetch to update UI state
-              if (currentUser) {
-                fetchMyBookings(currentUser.id);
-              }
+          const response = await fetch('/api/sync', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ bookings: backupBookings, users: backupUsers })
+          });
+          const data = await response.json();
+          if (response.ok && data.success) {
+            if (currentUser) {
+              fetchMyBookings(currentUser.id, true);
             }
           }
         } catch (err) {
@@ -197,7 +208,7 @@ export default function App() {
     window.addEventListener('focus', refreshSilent);
     document.addEventListener('visibilitychange', handleVisibility);
     window.addEventListener('storage', handleStorage);
-    const interval = setInterval(refreshSilent, 8000);
+    const interval = setInterval(refreshSilent, 5000);
 
     return () => {
       window.removeEventListener('focus', refreshSilent);
@@ -234,6 +245,7 @@ export default function App() {
   // Handle Cancel Booking
   const handleCancelBooking = async (id: string) => {
     if (!currentUser) return;
+    setBookings(prev => prev.map(b => (b.id === id ? { ...b, status: 'Cancelled' } : b)));
     try {
       const response = await fetch(`/api/bookings/${id}/cancel`, {
         method: 'PUT',
@@ -242,7 +254,6 @@ export default function App() {
       });
       const data = await response.json();
       if (response.ok && data.success) {
-        // Refresh bookings
         fetchMyBookings(currentUser.id);
       } else {
         console.error(data.error || 'Failed to cancel booking.');

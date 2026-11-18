@@ -14,6 +14,8 @@ export interface Booking {
   createdAt: string;
   updatedAt?: string;
   priceEstimate?: string;
+  finalAmount?: string;
+  completedAt?: string;
   driverName?: string;
   driverPhone?: string;
   vehicleDetails?: string;

@@ -224,6 +224,7 @@ _Please confirm my luxury ride with a professional driver._ Thank you!`;
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           userId: currentUser.id,
+          userProfile: currentUser,
           bookingDetails: pendingBooking
         })
       });
