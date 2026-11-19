@@ -84,6 +84,13 @@ export default function App() {
           });
           const data = await response.json();
           if (response.ok && data.success) {
+            if (Array.isArray(data.deletedIds) && data.deletedIds.length > 0) {
+              try {
+                const delSet = new Set(data.deletedIds);
+                const cleaned = backupBookings.filter((b: any) => b && b.id && !delSet.has(b.id));
+                localStorage.setItem('avb_durable_bookings', JSON.stringify(cleaned));
+              } catch {}
+            }
             if (currentUser) {
               fetchMyBookings(currentUser.id, true);
             }
@@ -139,15 +146,16 @@ export default function App() {
       if (response.ok && data.success) {
         const serverBookings: Booking[] = Array.isArray(data.bookings) ? data.bookings : [];
         const serverIds = new Set(serverBookings.map(b => b.id));
+        const deletedIdsSet = new Set<string>(Array.isArray(data.deletedIds) ? data.deletedIds : []);
 
-        // Preserve only offline-created local bookings for this user that haven't reached the server yet
+        // Preserve only offline-created local bookings for this user that haven't reached the server yet (and weren't deleted by admin)
         const existingDurableStr = localStorage.getItem('avb_durable_bookings') || '[]';
         let localOnlyBookings: Booking[] = [];
         try {
           const existingDurable = JSON.parse(existingDurableStr);
           if (Array.isArray(existingDurable)) {
             localOnlyBookings = existingDurable.filter(
-              (b: any) => b && b.id && !serverIds.has(b.id) && b.userId === userId
+              (b: any) => b && b.id && !serverIds.has(b.id) && !deletedIdsSet.has(b.id) && b.userId === userId
             );
           }
         } catch (err) {}
@@ -157,14 +165,20 @@ export default function App() {
         setBookings(mergedBookings);
         localStorage.setItem('avb_bookings', JSON.stringify(mergedBookings));
 
-        // Update durable store with fresh authoritative server bookings
+        // Update durable store with fresh authoritative server bookings and purge deleted bookings
         try {
           const existingDurable = JSON.parse(existingDurableStr);
           const durableMap = new Map(
-            Array.isArray(existingDurable) ? existingDurable.map((b: any) => [b.id, b]) : []
+            Array.isArray(existingDurable)
+              ? existingDurable
+                  .filter((b: any) => b && b.id && !deletedIdsSet.has(b.id))
+                  .map((b: any) => [b.id, b])
+              : []
           );
           serverBookings.forEach(b => {
-            durableMap.set(b.id, b);
+            if (!deletedIdsSet.has(b.id)) {
+              durableMap.set(b.id, b);
+            }
           });
           localStorage.setItem('avb_durable_bookings', JSON.stringify(Array.from(durableMap.values())));
         } catch (err) {}

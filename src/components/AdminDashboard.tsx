@@ -5,7 +5,7 @@ import { jsPDF } from 'jspdf';
 import { 
   Search, Filter, Calendar, MapPin, User, Phone, CheckCircle, 
   XCircle, Clock, RefreshCw, ChevronDown, ShieldCheck, LogOut, TrendingUp, Info,
-  Download, IndianRupee, FileText, X
+  Download, IndianRupee, FileText, X, Trash2
 } from 'lucide-react';
 
 interface EnrichedBooking extends Booking {
@@ -36,6 +36,9 @@ export default function AdminDashboard({ adminToken, onLogout }: AdminDashboardP
   const [completionModalBooking, setCompletionModalBooking] = useState<EnrichedBooking | null>(null);
   const [completionAmountInput, setCompletionAmountInput] = useState('');
   const [completionAmountError, setCompletionAmountError] = useState<string | null>(null);
+  const [deleteConfirmBooking, setDeleteConfirmBooking] = useState<EnrichedBooking | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [dashboardBanner, setDashboardBanner] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [editForm, setEditForm] = useState({
     name: '',
     contact: '',
@@ -491,6 +494,58 @@ export default function AdminDashboard({ adminToken, onLogout }: AdminDashboardP
     }
   };
 
+  const handleConfirmDeleteBooking = async () => {
+    if (!deleteConfirmBooking) return;
+    const target = deleteConfirmBooking;
+    setDeletingId(target.id);
+    setDashboardBanner(null);
+    setActionError(null);
+    setActionSuccess(null);
+
+    try {
+      const response = await fetch(`/api/admin/bookings/${encodeURIComponent(target.id)}`, {
+        method: 'DELETE',
+        headers: {
+          'Authorization': adminToken
+        }
+      });
+      const data = await response.json();
+      if (response.ok && data.success) {
+        setBookings(prev => prev.filter(b => b.id !== target.id));
+        setSelectedBooking(prev => (prev?.id === target.id ? null : prev));
+
+        try {
+          const existingDurableStr = localStorage.getItem('avb_durable_bookings') || '[]';
+          const existingDurable = JSON.parse(existingDurableStr);
+          if (Array.isArray(existingDurable)) {
+            const filtered = existingDurable.filter((b: any) => b && b.id !== target.id);
+            localStorage.setItem('avb_durable_bookings', JSON.stringify(filtered));
+          }
+        } catch {}
+
+        setDeleteConfirmBooking(null);
+        setDashboardBanner({
+          type: 'success',
+          message: `Booking ${target.id} permanently deleted.`
+        });
+      } else {
+        setDashboardBanner({
+          type: 'error',
+          message: data.error || 'Failed to delete booking.'
+        });
+        setDeleteConfirmBooking(null);
+      }
+    } catch (err) {
+      setDashboardBanner({
+        type: 'error',
+        message: 'Network error. Failed to delete booking.'
+      });
+      setDeleteConfirmBooking(null);
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
   // Filter and sort bookings
   const filteredBookings = bookings
     .filter(b => {
@@ -625,6 +680,26 @@ export default function AdminDashboard({ adminToken, onLogout }: AdminDashboardP
           </div>
         </div>
 
+        {dashboardBanner && (
+          <div
+            className={`px-4 py-3 rounded-xl border text-xs font-medium flex items-center justify-between ${
+              dashboardBanner.type === 'success'
+                ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+                : 'bg-rose-500/10 border-rose-500/30 text-rose-400'
+            }`}
+          >
+            <span>{dashboardBanner.message}</span>
+            <button
+              type="button"
+              onClick={() => setDashboardBanner(null)}
+              className="text-zinc-400 hover:text-white cursor-pointer"
+              aria-label="Dismiss message"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        )}
+
         {/* Bookings Table / List Container */}
         {loading ? (
           <div className="bg-zinc-900/30 border border-zinc-800/60 rounded-2xl p-16 text-center">
@@ -679,9 +754,24 @@ export default function AdminDashboard({ adminToken, onLogout }: AdminDashboardP
                           {booking.createdAt}
                         </span>
                       </div>
-                      <span className={`text-[10px] uppercase font-bold tracking-wider px-2.5 py-1 rounded-md border ${getStatusColor(booking.status)}`}>
-                        {booking.status}
-                      </span>
+                      <div className="flex items-center gap-2">
+                        <span className={`text-[10px] uppercase font-bold tracking-wider px-2.5 py-1 rounded-md border ${getStatusColor(booking.status)}`}>
+                          {booking.status}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setDeleteConfirmBooking(booking);
+                          }}
+                          disabled={deletingId === booking.id}
+                          title={`Delete booking ${booking.id}`}
+                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md border border-rose-500/30 bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 hover:text-rose-300 text-[10px] font-bold uppercase tracking-wider transition-colors cursor-pointer disabled:opacity-50"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                          Delete
+                        </button>
+                      </div>
                     </div>
 
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -1106,6 +1196,18 @@ export default function AdminDashboard({ adminToken, onLogout }: AdminDashboardP
                             </div>
                           )
                         )}
+                        {/* Manual Delete Booking Action */}
+                        <div className="pt-3 border-t border-zinc-800/80">
+                          <button
+                            type="button"
+                            onClick={() => setDeleteConfirmBooking(selectedBooking)}
+                            disabled={deletingId === selectedBooking.id}
+                            className="w-full bg-rose-950/30 hover:bg-rose-950/60 border border-rose-900/50 text-rose-400 hover:text-rose-300 font-bold text-xs py-2.5 px-4 rounded-xl transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                            Delete This Booking
+                          </button>
+                        </div>
                       </>
                     )}
 
@@ -1224,6 +1326,77 @@ export default function AdminDashboard({ adminToken, onLogout }: AdminDashboardP
                   </button>
                 </div>
               </form>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Delete Booking Confirmation Modal */}
+      <AnimatePresence>
+        {deleteConfirmBooking && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 12 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 12 }}
+              className="w-full max-w-md bg-zinc-900 border border-rose-900/50 rounded-2xl p-6 shadow-2xl text-left space-y-5"
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-400 flex items-center justify-center shrink-0">
+                    <Trash2 className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <span className="text-[10px] font-mono uppercase tracking-widest text-rose-400 font-bold block">
+                      Confirm Deletion • {deleteConfirmBooking.id}
+                    </span>
+                    <h3 className="text-lg font-bold text-white">Delete this booking?</h3>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setDeleteConfirmBooking(null)}
+                  className="text-zinc-500 hover:text-white p-1 rounded-lg cursor-pointer"
+                  aria-label="Close delete confirmation"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <div className="bg-zinc-950 border border-zinc-800/80 rounded-xl p-3.5 text-xs space-y-1">
+                <p className="text-zinc-200 font-semibold">
+                  {deleteConfirmBooking.name} • <span className="font-mono text-zinc-400">{deleteConfirmBooking.serviceType}</span>
+                </p>
+                <p className="text-zinc-500 line-clamp-1">
+                  {deleteConfirmBooking.pickup} → {deleteConfirmBooking.drop}
+                </p>
+                <p className="text-zinc-500 font-mono">
+                  {deleteConfirmBooking.date} at {deleteConfirmBooking.time}
+                </p>
+              </div>
+
+              <p className="text-zinc-400 text-xs leading-relaxed">
+                This will permanently remove booking <span className="text-white font-mono font-semibold">{deleteConfirmBooking.id}</span> from the database and customer booking history. This action cannot be undone.
+              </p>
+
+              <div className="flex items-center gap-3 pt-1">
+                <button
+                  type="button"
+                  onClick={() => setDeleteConfirmBooking(null)}
+                  className="flex-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 font-semibold text-xs py-3 rounded-xl transition-colors cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleConfirmDeleteBooking}
+                  disabled={deletingId === deleteConfirmBooking.id}
+                  className="flex-1 bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs py-3 px-4 rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  {deletingId === deleteConfirmBooking.id ? 'Deleting...' : 'Delete Permanently'}
+                </button>
+              </div>
             </motion.div>
           </div>
         )}
